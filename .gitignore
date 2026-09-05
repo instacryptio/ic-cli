@@ -1,0 +1,12 @@
+# Binary
+/icc
+
+# Sensitive files
+*.lock
+*.key
+*.icfx
+*.icid
+
+# Text Editor Swap
+.swo
+.swp

@@ -1,0 +1,293 @@
+name: Release
+
+# Build the icc binary for all supported platforms and attach them to a
+# published GitHub Release. Every target is a native (or VM-native) cgo build
+# WITH YubiKey hardware-key support — the C library (libykpers-1) and a runner
+# exist for each, so no target falls back to a feature-reduced pure-Go build.
+#
+# Trigger: publishing a Release via the GitHub web UI. workflow_dispatch is also
+# offered so a build can be re-run against an existing tag/release for testing
+# (create a pre-release first — "published" fires for pre-releases too).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag/release to build and attach binaries to
+        required: true
+
+# The publish job needs to upload assets onto the release.
+permissions:
+  contents: write
+
+# The release tag drives both the ldflags version stamp and the upload target.
+# Resolves from the release event, or the manual-dispatch input.
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  # --- Native POSIX runners: Linux + macOS, both arches ---------------------
+  build-unix:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { asset: icc-linux-amd64, runner: ubuntu-latest,    os: linux }
+          - { asset: icc-linux-arm64, runner: ubuntu-24.04-arm, os: linux }
+          - { asset: icc-macos-amd64, runner: macos-15-intel, os: macos }
+          - { asset: icc-macos-arm64, runner: macos-latest,   os: macos }
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install native deps (Linux)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libykpers-1-dev libfido2-dev
+
+      - name: Install native deps (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          # The runner image preinstalls the untrusted aws/tap (for the AWS CLI),
+          # which makes brew emit a "taps are not trusted" warning. We don't use
+          # it; drop it so a security product's build logs stay clean. Removing the
+          # tap doesn't uninstall the already-present CLI.
+          brew untap aws/tap 2>/dev/null || true
+          brew install pkg-config ykpers libfido2 openssl@3
+
+      # Try the full build (fido2 tag). If go-libfido2 won't build on this
+      # platform, retry without the tag — the binary keeps YubiKey identity
+      # support (ykpers), just without FIDO2 WebAuthn 2FA.
+      #
+      # macOS: Homebrew's include/lib dirs are NOT on the default compiler
+      # search path, and OpenSSL (needed by libfido2) is keg-only — so cgo
+      # can't find ykpers-1/ykcore.h or openssl/ec.h without pointing at them
+      # explicitly. Linux needs nothing extra (/usr/include is searched).
+      - name: Build
+        run: |
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            BREW="$(brew --prefix)"
+            SSL="$(brew --prefix openssl@3)"
+            YK="$(brew --prefix ykpers)"
+            export PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$BREW/share/pkgconfig:$SSL/lib/pkgconfig:$YK/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+            export CGO_CFLAGS="-I$BREW/include -I$SSL/include -I$YK/include"
+            export CGO_LDFLAGS="-L$BREW/lib -L$SSL/lib -L$YK/lib"
+          fi
+          make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
+          || make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # --- Windows via MSYS2: amd64 (MINGW64) + arm64 (CLANGARM64) ---------------
+  build-windows:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: icc-windows-amd64
+            runner: windows-latest
+            msystem: MINGW64
+            prefix: mingw-w64-x86_64
+            cc: gcc
+          - asset: icc-windows-arm64
+            runner: windows-11-arm
+            msystem: CLANGARM64
+            prefix: mingw-w64-clang-aarch64
+            cc: clang
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # MSYS2's own Go + toolchain so cgo links against the mingw/clang libs.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            ${{ matrix.prefix }}-go
+            ${{ matrix.prefix }}-${{ matrix.cc }}
+            ${{ matrix.prefix }}-pkgconf
+            ${{ matrix.prefix }}-yubikey-personalization
+            ${{ matrix.prefix }}-libfido2
+            make git
+
+      - name: Build
+        run: |
+          make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
+          || make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # --- FreeBSD via QEMU VM: amd64 (on metal) + arm64 (emulated, slow) --------
+  build-freebsd:
+    name: build ${{ matrix.asset }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { asset: icc-freebsd-amd64, arch: x86_64 }
+          - { asset: icc-freebsd-arm64, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          arch: ${{ matrix.arch }}
+          usesh: true
+          # Forward the release tag into the guest (host env isn't inherited).
+          envs: 'TAG'
+          # BSD make can't parse the GNU-make Makefile — use gmake.
+          prepare: |
+            pkg install -y go gmake pkgconf git ykpers libfido2
+          run: |
+            # Resolve a usable pkg-config (OpenBSD ships its own; pkgconf provides
+            # it on FreeBSD) and point it at the BSD .pc dirs (lib + libdata). The
+            # Makefile + cgo both honor this PKG_CONFIG.
+            export PKG_CONFIG="$(command -v pkg-config || command -v pkgconf || echo pkg-config)"
+            PCP="/usr/local/lib/pkgconfig:/usr/local/libdata/pkgconfig:/usr/local/share/pkgconfig"
+            # Self-heal: prepend the actual dir of each .pc wherever the port put it.
+            for pc in ykpers-1 libfido2; do
+              d="$(find /usr/local /usr/pkg -name "$pc.pc" 2>/dev/null | head -1)"
+              [ -n "$d" ] && PCP="$(dirname "$d"):$PCP"
+            done
+            export PKG_CONFIG_PATH="$PCP"
+            echo "--- build env ---"; uname -a; go version; grep icfx go.mod; echo "PKG_CONFIG=$PKG_CONFIG"
+            echo "installed HW pkgs:"; (pkg_info 2>/dev/null || pkg info 2>/dev/null) | grep -iE 'ykpers|yubikey|fido' || echo "  (none matched!)"
+            "$PKG_CONFIG" --cflags --libs ykpers-1 || echo "ykpers-1 NOT FOUND"
+            "$PKG_CONFIG" --cflags --libs libfido2 || echo "libfido2 NOT FOUND"
+            # Trust the rsync'd workspace so git doesn't exit 128 (dubious ownership)
+            # — also lets the Makefile stamp a real commit; skip Go's own VCS stamp
+            # regardless (we stamp via ldflags); and let Go fetch the go.mod toolchain
+            # when the packaged one is older (OpenBSD ports: 1.26.2 vs required 1.26.6).
+            git config --global --add safe.directory '*' 2>/dev/null || true
+            export GOFLAGS=-buildvcs=false
+            export GOTOOLCHAIN=auto
+            # go-libfido2 ships NO freebsd/openbsd cgo directive, so -lfido2 is never
+            # linked on BSD — inject it (via pkg-config, hardcoded fallback) alongside
+            # the base /usr/local include+lib the compiler doesn't search by default.
+            export CGO_CFLAGS="-I/usr/local/include $("$PKG_CONFIG" --cflags libfido2 2>/dev/null)"
+            export CGO_LDFLAGS="-L/usr/local/lib $("$PKG_CONFIG" --libs libfido2 2>/dev/null || echo -lfido2)"
+            gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
+            || { echo "--- fido2 build failed; retrying without fido2 tag ---"; gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=; }
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # --- OpenBSD via QEMU VM: amd64 (on metal) + arm64 (emulated, slow) --------
+  build-openbsd:
+    name: build ${{ matrix.asset }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { asset: icc-openbsd-amd64, arch: x86_64 }
+          - { asset: icc-openbsd-arm64, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build in OpenBSD VM
+        uses: vmactions/openbsd-vm@v1
+        with:
+          arch: ${{ matrix.arch }}
+          usesh: true
+          # Forward the release tag into the guest (host env isn't inherited).
+          envs: 'TAG'
+          prepare: |
+            # NB: the OpenBSD *package* is `ykpers` (PKGNAME ykpers-1.20.0p3),
+            # not the port-dir name `yubikey-personalization` — the latter is not
+            # an installable stem and silently no-ops.
+            pkg_add -I go gmake pkgconf git ykpers libfido2
+          run: |
+            # Resolve a usable pkg-config (OpenBSD ships its own; pkgconf provides
+            # it on FreeBSD) and point it at the BSD .pc dirs (lib + libdata). The
+            # Makefile + cgo both honor this PKG_CONFIG.
+            export PKG_CONFIG="$(command -v pkg-config || command -v pkgconf || echo pkg-config)"
+            PCP="/usr/local/lib/pkgconfig:/usr/local/libdata/pkgconfig:/usr/local/share/pkgconfig"
+            # Self-heal: prepend the actual dir of each .pc wherever the port put it.
+            for pc in ykpers-1 libfido2; do
+              d="$(find /usr/local /usr/pkg -name "$pc.pc" 2>/dev/null | head -1)"
+              [ -n "$d" ] && PCP="$(dirname "$d"):$PCP"
+            done
+            export PKG_CONFIG_PATH="$PCP"
+            echo "--- build env ---"; uname -a; go version; grep icfx go.mod; echo "PKG_CONFIG=$PKG_CONFIG"
+            echo "installed HW pkgs:"; (pkg_info 2>/dev/null || pkg info 2>/dev/null) | grep -iE 'ykpers|yubikey|fido' || echo "  (none matched!)"
+            "$PKG_CONFIG" --cflags --libs ykpers-1 || echo "ykpers-1 NOT FOUND"
+            "$PKG_CONFIG" --cflags --libs libfido2 || echo "libfido2 NOT FOUND"
+            # Trust the rsync'd workspace so git doesn't exit 128 (dubious ownership)
+            # — also lets the Makefile stamp a real commit; skip Go's own VCS stamp
+            # regardless (we stamp via ldflags); and let Go fetch the go.mod toolchain
+            # when the packaged one is older (OpenBSD ports: 1.26.2 vs required 1.26.6).
+            git config --global --add safe.directory '*' 2>/dev/null || true
+            export GOFLAGS=-buildvcs=false
+            export GOTOOLCHAIN=auto
+            # go-libfido2 ships NO freebsd/openbsd cgo directive, so -lfido2 is never
+            # linked on BSD — inject it (via pkg-config, hardcoded fallback) alongside
+            # the base /usr/local include+lib the compiler doesn't search by default.
+            export CGO_CFLAGS="-I/usr/local/include $("$PKG_CONFIG" --cflags libfido2 2>/dev/null)"
+            export CGO_LDFLAGS="-L/usr/local/lib $("$PKG_CONFIG" --libs libfido2 2>/dev/null || echo -lfido2)"
+            gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
+            || { echo "--- fido2 build failed; retrying without fido2 tag ---"; gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=; }
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # --- Collect every built binary, checksum them, attach to the release ------
+  # All-or-nothing: this job has no `if:`, so it runs ONLY when every needed
+  # build job succeeds. Because the matrices are fail-fast: false, each matrix
+  # job reports success only if all its entries pass — so a single failed target
+  # (any OS/arch) skips publish and leaves the release without partial assets.
+  publish:
+    name: Upload assets + checksums
+    needs: [build-unix, build-windows, build-freebsd, build-openbsd]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          sha256sum icc-* > checksums.txt
+          echo "Built assets:"
+          cat checksums.txt
+
+      - name: Upload to release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${TAG}" icc-* checksums.txt \
+            --repo "${{ github.repository }}" --clobber
