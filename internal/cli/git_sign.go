@@ -395,6 +395,8 @@ func init() {
 	gitSignVerifyCommitCmd.Flags().String("fetch", "", "Fetch missing signature notes without prompting: 'y' or 'n'")
 	gitSignVerifyCommitCmd.Flags().String("auto-fetch", "", "Persist auto-fetch of the notes refspec: 'y' or 'n'")
 
-	gitSignCmd.AddCommand(gitSignInstallCmd, gitSignPostCommitCmd, gitSignVerifyCommitCmd)
+	gitSignPushCmd.Flags().BoolP("force", "f", false, "Force-push the notes ref (overwrite a diverged remote)")
+
+	gitSignCmd.AddCommand(gitSignInstallCmd, gitSignPostCommitCmd, gitSignVerifyCommitCmd, gitSignPushCmd)
 	rootCmd.AddCommand(gitSignCmd)
 }

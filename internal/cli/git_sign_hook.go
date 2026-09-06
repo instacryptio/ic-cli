@@ -85,6 +85,59 @@ gains native support for the ICFX signature format.`,
 	RunE: runGitSignVerifyCommit,
 }
 
+// gitSignPushCmd pushes the signature-notes ref to a remote — a shortcut for
+// `git push <remote> refs/notes/icfx-sigs`, which git won't do as part of a
+// normal branch push.
+var gitSignPushCmd = &cobra.Command{
+	Use:   "push [remote]",
+	Short: "Push your icfx signature notes to a remote",
+	Long: `Push the signature-notes ref (` + gitNotesRef + `) to a remote so others
+can verify your signed commits — git does NOT push notes as part of a normal
+'git push', so run this after pushing your branch.
+
+Remote defaults to the branch's upstream (else "origin"); pass one to override.
+Use --force to overwrite a diverged remote notes ref (e.g. after rewriting
+history).`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runGitSignPush,
+}
+
+func runGitSignPush(cmd *cobra.Command, args []string) error {
+	// Nothing to push if we've never signed anything in this repo.
+	if err := gitCmd("rev-parse", "--verify", "--quiet", gitNotesRef).Run(); err != nil {
+		return fmt.Errorf("no signature notes to push (%s does not exist yet); sign a commit first", gitNotesRef)
+	}
+
+	remote := ""
+	if len(args) > 0 {
+		remote = args[0]
+	}
+	if remote == "" {
+		r, ok := gitDefaultRemote()
+		if !ok {
+			return fmt.Errorf("no remote configured; specify one: icc git-sign push <remote>")
+		}
+		remote = r
+	}
+	// A leading '-' would be parsed by git as an option (arg injection).
+	if strings.HasPrefix(remote, "-") {
+		return fmt.Errorf("invalid remote name %q", utils.SanitizeTerminal(remote))
+	}
+
+	pushArgs := []string{"push"}
+	if force, _ := cmd.Flags().GetBool("force"); force {
+		pushArgs = append(pushArgs, "--force")
+	}
+	pushArgs = append(pushArgs, remote, gitNotesRef)
+
+	if out, err := gitCmd(pushArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("pushing signature notes to %s: %w (%s)",
+			utils.SanitizeTerminal(remote), err, utils.SanitizeTerminal(strings.TrimSpace(string(out))))
+	}
+	fmt.Println(utils.RenderSuccess("Pushed signature notes to ") + utils.SanitizeTerminal(remote))
+	return nil
+}
+
 func runGitSignPostCommit(cmd *cobra.Command, args []string) error {
 	commit := "HEAD"
 	if len(args) > 0 {
