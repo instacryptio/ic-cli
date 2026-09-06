@@ -28,6 +28,18 @@ func gitCmd(args ...string) *exec.Cmd {
 	return cmd
 }
 
+// gitNetCmd is gitCmd for operations that talk to a remote. It disables git's
+// command-executing transports (ext::, fd::) so a malicious remote URL in a
+// hostile repo's .git/config can't run arbitrary commands when we resolve a
+// remote and fetch/push on the user's behalf. http/https/ssh/git/file stay
+// allowed, so normal and local-path remotes are unaffected.
+func gitNetCmd(args ...string) *exec.Cmd {
+	return gitCmd(append([]string{
+		"-c", "protocol.ext.allow=never",
+		"-c", "protocol.fd.allow=never",
+	}, args...)...)
+}
+
 // envWithoutICCPass returns the current environment minus ICC_PASS.
 func envWithoutICCPass() []string {
 	env := os.Environ()
@@ -130,7 +142,7 @@ func runGitSignPush(cmd *cobra.Command, args []string) error {
 	}
 	pushArgs = append(pushArgs, remote, gitNotesRef)
 
-	if out, err := gitCmd(pushArgs...).CombinedOutput(); err != nil {
+	if out, err := gitNetCmd(pushArgs...).CombinedOutput(); err != nil {
 		return fmt.Errorf("pushing signature notes to %s: %w (%s)",
 			utils.SanitizeTerminal(remote), err, utils.SanitizeTerminal(strings.TrimSpace(string(out))))
 	}
@@ -462,7 +474,7 @@ func gitDefaultRemote() (string, bool) {
 
 // gitFetchNotes fetches only our signature-notes ref from the given remote.
 func gitFetchNotes(remote string) error {
-	cmd := gitCmd("fetch", remote, gitNotesRefspec)
+	cmd := gitNetCmd("fetch", remote, gitNotesRefspec)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch %s %s: %w (%s)", remote, gitNotesRefspec, err, strings.TrimSpace(string(out)))
 	}
