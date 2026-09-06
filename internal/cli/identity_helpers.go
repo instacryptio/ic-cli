@@ -153,10 +153,13 @@ func hwPassFnForBackend(backend, name string) keystore.PassphraseFunc {
 // file-backed device still decrypts with the empty-passphrase KEK.
 func hwPassFnForKEK(convention, name string) keystore.PassphraseFunc {
 	if convention == identity.HWKEKNone {
-		return func() (string, error) { return "", nil }
+		// Fresh empty (non-nil) slice each call: the decorator wipes what it
+		// receives, and DeriveHardwareKEKBytes intentionally accepts an empty
+		// passphrase (keychain-origin HW keys derive the KEK from the device alone).
+		return func() ([]byte, error) { return []byte{}, nil }
 	}
-	return func() (string, error) {
-		return utils.ReadPassphrase(fmt.Sprintf("Enter passphrase for %q: ", name))
+	return func() ([]byte, error) {
+		return utils.ReadPassphraseBytes(fmt.Sprintf("Enter passphrase for %q: ", name))
 	}
 }
 
@@ -206,8 +209,8 @@ func nonHWStoreForBackend(backend, name string) (keystore.Keystore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving keys directory: %w", err)
 	}
-	return keystore.NewEncryptedFileStoreWithDir(dir, func() (string, error) {
-		return utils.ReadPassphrase(fmt.Sprintf("Enter passphrase for %q: ", name))
+	return keystore.NewEncryptedFileStoreWithDir(dir, func() ([]byte, error) {
+		return utils.ReadPassphraseBytes(fmt.Sprintf("Enter passphrase for %q: ", name))
 	}), nil
 }
 
@@ -362,8 +365,8 @@ func getKeystoreWithCreation() (keystore.Keystore, error) {
 	}
 
 	if keystoreType == "file" || !keychainAvailable {
-		passphraseFunc := func() (string, error) {
-			return utils.ReadPassphrase("Enter keystore passphrase: ")
+		passphraseFunc := func() ([]byte, error) {
+			return utils.ReadPassphraseBytes("Enter keystore passphrase: ")
 		}
 
 		plainStore, err := keystore.NewFileStore()
@@ -372,19 +375,8 @@ func getKeystoreWithCreation() (keystore.Keystore, error) {
 		}
 		existingKeys, _ := plainStore.ListNames()
 		if len(existingKeys) == 0 {
-			passphraseFunc = func() (string, error) {
-				pass, err := utils.ReadPassphrase("Create keystore passphrase: ")
-				if err != nil {
-					return "", err
-				}
-				confirm, err := utils.ReadPassphrase("Confirm keystore passphrase: ")
-				if err != nil {
-					return "", err
-				}
-				if pass != confirm {
-					return "", fmt.Errorf("passphrases do not match")
-				}
-				return pass, nil
+			passphraseFunc = func() ([]byte, error) {
+				return utils.ReadNewPassphraseBytes("Create keystore passphrase: ", "Confirm keystore passphrase: ")
 			}
 		}
 
@@ -455,8 +447,11 @@ func printIdentity(id identity.Identity) {
 	}
 	fmt.Println(utils.LabelStyle.Render("  IC ID:") + id.ID)
 	fmt.Println(utils.LabelStyle.Render("  Alias:") + id.Alias)
-	if id.FirstName != "" || id.LastName != "" {
-		fmt.Println(utils.LabelStyle.Render("  Name:") + strings.TrimSpace(id.FirstName+" "+id.LastName))
+	if id.FirstName != "" {
+		fmt.Println(utils.LabelStyle.Render("  First Name:") + id.FirstName)
+	}
+	if id.LastName != "" {
+		fmt.Println(utils.LabelStyle.Render("  Last Name:") + id.LastName)
 	}
 	fmt.Println(utils.LabelStyle.Render("  Email:") + id.Email)
 	fmt.Println(utils.LabelStyle.Render("  Status:") + id.Status)

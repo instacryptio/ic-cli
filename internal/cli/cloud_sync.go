@@ -164,25 +164,15 @@ func (h *cliSyncHost) OpenIdentity(name string) (cloud.SelfCrypter, error) {
 }
 
 // ClearKeys wipes an identity's key material from its backend (HW-aware via the
-// index entry) — the delete primitive handoff.HandoffAndDelete calls.
-func (h *cliSyncHost) ClearKeys(name string) error {
-	store, err := newIdentityStore()
+// passed index entry) — the delete primitive handoff.HandoffAndDelete calls. It
+// takes the already-resolved entry and does NOT re-read the index: handoff
+// removes the entry before calling this, so a lookup by name would miss it.
+func (h *cliSyncHost) ClearKeys(idx identity.IdentityIndex) error {
+	ks, err := keystoreForIdentity(idx)
 	if err != nil {
 		return err
 	}
-	entries, err := store.LoadIndex()
-	if err != nil {
-		return fmt.Errorf("loading identity index: %w", err)
-	}
-	idx, err := findIdentityIndex(entries, name)
-	if err != nil {
-		return fmt.Errorf("identity %q not found", name)
-	}
-	ks, err := keystoreForIdentity(*idx)
-	if err != nil {
-		return err
-	}
-	return ks.Clear(name)
+	return ks.Clear(idx.Name)
 }
 
 // runCloudSync performs a manual push+pull for the requested resources.
