@@ -153,6 +153,17 @@ func runGitSignVerifyCommit(cmd *cobra.Command, args []string) error {
 		commit = args[0]
 	}
 
+	fetchRaw, _ := cmd.Flags().GetString("fetch")
+	fetchFlag, err := normalizeYNFlag("fetch", fetchRaw)
+	if err != nil {
+		return err
+	}
+	autoRaw, _ := cmd.Flags().GetString("auto-fetch")
+	autoFetchFlag, err := normalizeYNFlag("auto-fetch", autoRaw)
+	if err != nil {
+		return err
+	}
+
 	commitSHA, err := gitRevParse(commit)
 	if err != nil {
 		return err
@@ -160,7 +171,13 @@ func runGitSignVerifyCommit(cmd *cobra.Command, args []string) error {
 
 	sigBytes, err := gitNotesShow(commitSHA)
 	if err != nil {
-		return fmt.Errorf("no icfx signature found for %s: %w", commitSHA[:8], err)
+		// The signature note isn't local — common on a fresh clone, since git
+		// doesn't fetch refs/notes/* by default. Offer to fetch it (and to make
+		// that automatic) before giving up.
+		sigBytes, err = fetchNotesInteractively(commitSHA, fetchFlag, autoFetchFlag)
+		if err != nil {
+			return err
+		}
 	}
 
 	rawSig, fpr, err := icfxCrypto.ParseGitSignature(sigBytes)
@@ -193,6 +210,92 @@ func runGitSignVerifyCommit(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println(utils.RenderSuccess("icfx: Good signature from ") + utils.SanitizeTerminal(label) + utils.RenderDim(" ["+fpr+"]"))
 	return nil
+}
+
+// normalizeYNFlag validates a y/n command flag, returning "" (unset → prompt),
+// "y", or "n". Anything else is an error.
+func normalizeYNFlag(name, val string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "":
+		return "", nil
+	case "y":
+		return "y", nil
+	case "n":
+		return "n", nil
+	}
+	return "", fmt.Errorf("--%s must be 'y' or 'n'", name)
+}
+
+// resolveYN decides a yes/no question: a pre-validated explicit flag ("y"/"n")
+// wins; otherwise, when stdin is a terminal, it prompts (defaulting Yes when
+// promptDefaultYes, else No); otherwise (non-interactive, no flag) it returns
+// nonTTYDefault so scripts never block on an unanswerable prompt.
+func resolveYN(flag, prompt string, promptDefaultYes, nonTTYDefault bool) bool {
+	switch flag {
+	case "y":
+		return true
+	case "n":
+		return false
+	}
+	if !utils.IsInteractive() {
+		return nonTTYDefault
+	}
+	if promptDefaultYes {
+		return utils.ConfirmPromptDefaultYes(prompt)
+	}
+	return utils.ConfirmPrompt(prompt)
+}
+
+// fetchNotesInteractively is invoked by verify-commit when no local signature
+// note is found (common on a fresh clone — git doesn't fetch refs/notes/* by
+// default). It offers to fetch our notes ref from the repo's remote, then to
+// persist that as an automatic fetch, and returns the note bytes on success.
+// fetchFlag / autoFetchFlag are pre-validated "", "y", or "n" (see resolveYN);
+// with neither flag and no TTY it fetches nothing (safe non-interactive default).
+func fetchNotesInteractively(commitSHA, fetchFlag, autoFetchFlag string) ([]byte, error) {
+	notFound := func() error {
+		return fmt.Errorf("no icfx signature found for %s", commitSHA[:8])
+	}
+
+	remote, ok := gitDefaultRemote()
+	if !ok {
+		// Local-only repo (or no usable remote) — nothing to fetch from.
+		return nil, notFound()
+	}
+	// remote comes from git config (attacker-controllable in a hostile repo):
+	// sanitize before it reaches the terminal, but pass the raw value to git.
+	safeRemote := utils.SanitizeTerminal(remote)
+
+	if !resolveYN(fetchFlag, gitNotesRef+
+		" of this repo has not been fetched yet or does not exist, do you want to try fetching now? (Y/n) ",
+		true, false) {
+		return nil, notFound()
+	}
+
+	if err := gitFetchNotes(remote); err != nil {
+		fmt.Fprintln(os.Stderr, utils.RenderWarning("fetch failed: ")+utils.SanitizeTerminal(err.Error()))
+		return nil, notFound()
+	}
+
+	// Offer to make future `git fetch` pull notes automatically (default No).
+	if !gitNotesRefspecConfigured(remote) && resolveYN(autoFetchFlag, fmt.Sprintf(
+		"After fetching, do you want this local repo to automatically fetch refs/notes in the future "+
+			"(git config --add remote.%s.fetch '%s')? (y/N) ", safeRemote, gitNotesRefspec), false, false) {
+		addErr := gitAddNotesRefspec(remote)
+		if addErr != nil {
+			fmt.Fprintln(os.Stderr, utils.RenderWarning("could not add fetch refspec: ")+utils.SanitizeTerminal(addErr.Error()))
+		}
+		if addErr == nil {
+			fmt.Fprintln(os.Stderr, utils.RenderDim("Configured: future `git fetch` will pull signature notes."))
+		}
+	}
+
+	sigBytes, err := gitNotesShow(commitSHA)
+	if err != nil {
+		return nil, fmt.Errorf("no icfx signature found for %s after fetching from %s "+
+			"(the note may not exist on the remote, or is attached to a different commit)", commitSHA[:8], safeRemote)
+	}
+	return sigBytes, nil
 }
 
 // commitHasICFXSignature reports whether the commit object content
@@ -257,4 +360,83 @@ func gitNotesShow(sha string) ([]byte, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// gitNotesRefspec fetches/tracks just our signature-notes ref. Deliberately
+// NON-force (no leading `+`): notes refs advance append-only, so a plain fetch
+// fast-forwards in every normal case (fresh clone creates it; new notes
+// fast-forward) and never overwrites local notes. A genuine notes-history
+// rewrite is the only thing that makes it reject non-fast-forward — the correct,
+// visible signal (rather than silently clobbering signature history). Scoped to
+// icfx-sigs so we never touch refs/notes/commits or other tools' notes.
+const gitNotesRefspec = gitNotesRef + ":" + gitNotesRef
+
+// gitDefaultRemote resolves the remote to fetch notes from: the current
+// branch's upstream remote if configured, else "origin" if it exists, else the
+// first configured remote. Returns ("", false) when the repo has no remote.
+func gitDefaultRemote() (string, bool) {
+	// Reject remote names beginning with "-": such a name would be passed as the
+	// first positional to `git fetch <remote> …` and parsed as an OPTION (git
+	// argument-injection, incl. the --upload-pack RCE class). A hostile repo's
+	// .git/config could carry one. Safe names are the only ones we act on.
+	safe := func(name string) bool { return name != "" && !strings.HasPrefix(name, "-") }
+
+	// Upstream remote of the current branch, if any (e.g. "origin").
+	if out, err := gitCmd("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").Output(); err == nil {
+		if up := strings.TrimSpace(string(out)); up != "" {
+			if name, _, ok := strings.Cut(up, "/"); ok && safe(name) {
+				return name, true
+			}
+		}
+	}
+	out, err := gitCmd("remote").Output()
+	if err != nil {
+		return "", false
+	}
+	remotes := strings.Fields(string(out))
+	for _, r := range remotes {
+		if r == "origin" {
+			return "origin", true
+		}
+	}
+	for _, r := range remotes {
+		if safe(r) {
+			return r, true
+		}
+	}
+	return "", false
+}
+
+// gitFetchNotes fetches only our signature-notes ref from the given remote.
+func gitFetchNotes(remote string) error {
+	cmd := gitCmd("fetch", remote, gitNotesRefspec)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch %s %s: %w (%s)", remote, gitNotesRefspec, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// gitNotesRefspecConfigured reports whether the notes refspec is already in the
+// remote's fetch config, so we don't append a duplicate line.
+func gitNotesRefspecConfigured(remote string) bool {
+	out, err := gitCmd("config", "--get-all", "remote."+remote+".fetch").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == gitNotesRefspec {
+			return true
+		}
+	}
+	return false
+}
+
+// gitAddNotesRefspec adds the notes refspec to the remote's fetch config so a
+// plain `git fetch` pulls signatures going forward.
+func gitAddNotesRefspec(remote string) error {
+	cmd := gitCmd("config", "--add", "remote."+remote+".fetch", gitNotesRefspec)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config --add remote.%s.fetch: %w (%s)", remote, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

@@ -135,6 +135,23 @@ func ConfirmPrompt(prompt string) bool {
 	return strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")
 }
 
+// ConfirmPromptDefaultYes is like ConfirmPrompt but defaults to YES: it returns
+// true unless the user explicitly answers "n" or "no" (case-insensitive). An
+// empty answer (just Enter, or non-interactive EOF) counts as yes. Use for
+// "(Y/n)" prompts where proceeding is the expected default.
+func ConfirmPromptDefaultYes(prompt string) bool {
+	answer := ReadLine(prompt)
+	return !strings.EqualFold(answer, "n") && !strings.EqualFold(answer, "no")
+}
+
+// IsInteractive reports whether stdin is a terminal, i.e. a human can answer
+// prompts. Callers use it to decide between prompting and applying a
+// non-interactive default (so scripts/pipes never block on an unanswerable
+// prompt).
+func IsInteractive() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
 // ConfirmOverwrite reports whether it is safe to write to path. It's safe when
 // the file doesn't exist (nothing to clobber) or path is "" (stdout). When the
 // file exists and stdin is a terminal, the user is prompted; when stdin is not
