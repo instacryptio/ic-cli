@@ -35,11 +35,11 @@ func roamingImportFn() profile.IdentityImportFn {
 		opts := profile.RoamingImportOptions{
 			KeysDir:     keysDir,
 			DestBackend: resolveDestBackend(),
-			PromptExisting: func(n string) (string, error) {
-				return utils.ReadPassphrase(fmt.Sprintf("Enter the passphrase for %q to import it into this device's keychain: ", n))
+			PromptExisting: func(n string) ([]byte, error) {
+				return utils.ReadPassphraseBytes(fmt.Sprintf("Enter the passphrase for %q to import it into this device's keychain: ", n))
 			},
-			PromptNew: func(n string) (string, error) {
-				return utils.ReadPassphrase(fmt.Sprintf("New passphrase for %q: ", n))
+			PromptNew: func(n string) ([]byte, error) {
+				return utils.ReadPassphraseBytes(fmt.Sprintf("New passphrase for %q: ", n))
 			},
 			Notify: func(msg string) { fmt.Println(utils.RenderDim(msg)) },
 		}

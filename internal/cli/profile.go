@@ -91,14 +91,15 @@ var profileImportCmd = &cobra.Command{
 // confirm the destructive replace, then import. Used by both `profile import`
 // and `cloud restore`.
 func importProfileFromData(data []byte, includeSettings, includePaths, preserveHW, yes bool) error {
-	passphrase, err := utils.ReadPassphrase("Enter backup passphrase: ")
+	passphrase, err := utils.ReadPassphraseBytes("Enter backup passphrase: ")
 	if err != nil {
 		return err
 	}
+	defer utils.Wipe(passphrase)
 
 	// Peek at the manifest before any destructive action so the user can see
 	// what they're about to wipe their local state for.
-	manifest, err := profile.PeekManifestFromBytes(data, passphrase)
+	manifest, err := profile.PeekManifestFromBytesWithPass(data, passphrase)
 	if err != nil {
 		return err
 	}
@@ -128,7 +129,7 @@ func importProfileFromData(data []byte, includeSettings, includePaths, preserveH
 	}
 
 	opts := profile.ImportOptions{
-		Passphrase:      passphrase,
+		PassphraseBytes: passphrase,
 		IncludeSettings: includeSettings,
 		IncludePaths:    includePaths,
 	}

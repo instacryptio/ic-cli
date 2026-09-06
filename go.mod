@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/instacryptio/icfx v0.1.1
+	github.com/instacryptio/icfx v0.1.2
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.42.0
 )

@@ -57,6 +57,26 @@ func toggleHWKey(id *identity.Identity, desired bool) error {
 	return disableHWKey(id)
 }
 
+// hwTogglePassFn returns the passphrase source for enabling/disabling HW
+// protection, chosen so the KEK derived here matches the one the UNLOCK path
+// derives (keystoreForIdentity → hwPassFnForKEK(idx.HWKEKConvention())):
+//
+//   - keychain-backed (HWKEKNone): the hardware device is the SOLE factor; the
+//     KEK uses an EMPTY passphrase. So do NOT prompt — a typed passphrase would
+//     derive KEK=HKDF(typed, response) at store time while every later unlock
+//     derives KEK=HKDF("", response), silently locking the identity out.
+//   - file-backed (HWKEKPassphrase): the KEK combines the keystore passphrase
+//     with the device, so prompt — once and cached (this toggle calls passFn
+//     several times across the decorator's store/verify operations).
+//
+// Mirrors ic-app's toggleHWKeyOn/Off, which dispatch on idx.Backend the same way.
+func hwTogglePassFn(id *identity.Identity) keystore.PassphraseFunc {
+	if id.Backend == identity.BackendKeychain && keystore.KeychainAvailable() {
+		return func() ([]byte, error) { return []byte{}, nil }
+	}
+	return singlePromptPassFn(id.Name)
+}
+
 // enableHWKey re-encrypts an existing identity's keys with the HW-augmented
 // KEK. Works with any configured backend (file or keychain): the existing
 // (non-HW) keys are loaded via the configured non-HW store, then re-stored
@@ -71,7 +91,7 @@ func enableHWKey(id *identity.Identity) error {
 		return fmt.Errorf("resolving keys directory: %w", err)
 	}
 
-	passFn := singlePromptPassFn(id.Name)
+	passFn := hwTogglePassFn(id)
 
 	// Load existing keys via the current non-HW backend.
 	srcKs := nonHWStoreFor(keysDir, passFn)
@@ -133,7 +153,7 @@ func disableHWKey(id *identity.Identity) error {
 		return fmt.Errorf("resolving keys directory: %w", err)
 	}
 
-	passFn := singlePromptPassFn(id.Name)
+	passFn := hwTogglePassFn(id)
 
 	hw, err := openSessionHWKey()
 	if err != nil {
@@ -199,13 +219,21 @@ func disableHWKey(id *identity.Identity) error {
 func singlePromptPassFn(name string) keystore.PassphraseFunc {
 	var (
 		once sync.Once
-		pass string
+		pass []byte
 		err  error
 	)
-	return func() (string, error) {
+	return func() ([]byte, error) {
 		once.Do(func() {
-			pass, err = utils.ReadPassphrase(fmt.Sprintf("Enter passphrase for %q: ", name))
+			pass, err = utils.ReadPassphraseBytes(fmt.Sprintf("Enter passphrase for %q: ", name))
 		})
-		return pass, err
+		if err != nil {
+			return nil, err
+		}
+		// The consuming keystore wipes the bytes it receives, but this prompt is
+		// shared across two keystores (HW-decorated + non-HW), so hand each caller
+		// a fresh copy and keep the cached secret intact.
+		cp := make([]byte, len(pass))
+		copy(cp, pass)
+		return cp, nil
 	}
 }

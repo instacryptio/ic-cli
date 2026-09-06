@@ -42,15 +42,23 @@ func prettyOS() string {
 // across commands — that's the future ic-agent's job.
 var (
 	ksPassOnce sync.Once
-	ksPassVal  string
+	ksPassVal  []byte
 	ksPassErr  error
 )
 
-func keystorePassphrase() (string, error) {
+func keystorePassphrase() ([]byte, error) {
 	ksPassOnce.Do(func() {
-		ksPassVal, ksPassErr = utils.ReadPassphrase("Keystore passphrase (to unlock cloud session): ")
+		ksPassVal, ksPassErr = utils.ReadPassphraseBytes("Keystore passphrase (to unlock cloud session): ")
 	})
-	return ksPassVal, ksPassErr
+	if ksPassErr != nil {
+		return nil, ksPassErr
+	}
+	// The consuming store wipes what it receives; this cached passphrase may back
+	// both the encKey store and the session store within one command, so return a
+	// fresh copy each call and keep the cache intact.
+	cp := make([]byte, len(ksPassVal))
+	copy(cp, ksPassVal)
+	return cp, nil
 }
 
 // useKeychain reports whether the OS keychain backs at-rest secrets on this
