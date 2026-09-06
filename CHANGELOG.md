@@ -2,4 +2,5 @@
 
 **v0.1.0 - 09-06-2026**
 
-- Initial release
+- Initial commit
+- git-sign refinements

@@ -390,6 +390,13 @@ func init() {
 	gitSignCmd.Flags().BoolP("sign", "s", false, "Sign mode")
 	gitSignCmd.Flags().BoolP("armor", "a", false, "ASCII armor output")
 
-	gitSignCmd.AddCommand(gitSignInstallCmd, gitSignPostCommitCmd, gitSignVerifyCommitCmd)
+	// verify-commit automation controls (each accepts only "y" or "n"; unset =
+	// prompt when interactive, safe "no" default otherwise).
+	gitSignVerifyCommitCmd.Flags().String("fetch", "", "Fetch missing signature notes without prompting: 'y' or 'n'")
+	gitSignVerifyCommitCmd.Flags().String("auto-fetch", "", "Persist auto-fetch of the notes refspec: 'y' or 'n'")
+
+	gitSignPushCmd.Flags().BoolP("force", "f", false, "Force-push the notes ref (overwrite a diverged remote)")
+
+	gitSignCmd.AddCommand(gitSignInstallCmd, gitSignPostCommitCmd, gitSignVerifyCommitCmd, gitSignPushCmd)
 	rootCmd.AddCommand(gitSignCmd)
 }

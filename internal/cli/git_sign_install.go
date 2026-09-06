@@ -173,7 +173,7 @@ func runGitSignInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println(utils.RenderDim("icfx signatures are stored as git notes under " + gitNotesRef + "."))
 	fmt.Println(utils.RenderDim("To share signatures with others, push the notes ref:"))
-	fmt.Println(utils.RenderDim("  git push origin " + gitNotesRef))
+	fmt.Println(utils.RenderDim("  icc git-sign push"))
 	fmt.Println()
 	fmt.Println(utils.RenderDim("When your git supports the icfx format natively, enable it with:"))
 	fmt.Println(utils.RenderDim("  git config commit.gpgsign true"))
