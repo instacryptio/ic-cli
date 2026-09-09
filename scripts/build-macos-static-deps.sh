@@ -105,10 +105,12 @@ tar xf libfido2.tgz
 cmake_static "libfido2-${LIBFIDO2_VER}" \
   -DBUILD_EXAMPLES=OFF -DBUILD_MANPAGES=OFF -DBUILD_TOOLS=OFF
 
-# 7. ykpers (autotools) — needs libyubikey + json-c + libusb (all in $PREFIX)
+# 7. ykpers (autotools) — needs libyubikey + json-c + libusb (all in $PREFIX).
+# ykpers-json.c uses TRUE/FALSE, which json-c >=0.14 removed (we build 0.18), so
+# define them ourselves (they're genuinely undefined now → no conflict).
 fetch "https://developers.yubico.com/yubikey-personalization/Releases/ykpers-${YKPERS_VER}.tar.gz" ykpers.tgz
 tar xf ykpers.tgz
-autotools_static "ykpers-${YKPERS_VER}" --with-backend=libusb-1.0
+autotools_static "ykpers-${YKPERS_VER}" --with-backend=libusb-1.0 'CPPFLAGS=-DTRUE=1 -DFALSE=0'
 
 touch "$MARKER"
 echo "== static dep prefix ready: $PREFIX =="
