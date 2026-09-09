@@ -51,36 +51,70 @@ jobs:
         if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libykpers-1-dev libfido2-dev
 
-      - name: Install native deps (macOS)
+      # macOS ships `icc` as a bare binary, so it must be self-contained: we build
+      # libfido2/ykpers/openssl/cbor + deps as STATIC libs from source into a
+      # private prefix and link those, leaving only the always-present macOS system
+      # frameworks dynamic. Here we just need the build tools; the heavy lifting is
+      # the cached dep build below. (untap aws/tap to keep a security product's
+      # build logs free of the runner's "untrusted tap" warning.)
+      - name: Install build tools (macOS)
         if: matrix.os == 'macos'
         run: |
-          # The runner image preinstalls the untrusted aws/tap (for the AWS CLI),
-          # which makes brew emit a "taps are not trusted" warning. We don't use
-          # it; drop it so a security product's build logs stay clean. Removing the
-          # tap doesn't uninstall the already-present CLI.
           brew untap aws/tap 2>/dev/null || true
-          brew install pkg-config ykpers libfido2 openssl@3
+          brew install pkg-config cmake autoconf automake libtool
 
-      # Try the full build (fido2 tag). If go-libfido2 won't build on this
-      # platform, retry without the tag — the binary keeps YubiKey identity
-      # support (ykpers), just without FIDO2 WebAuthn 2FA.
-      #
-      # macOS: Homebrew's include/lib dirs are NOT on the default compiler
-      # search path, and OpenSSL (needed by libfido2) is keg-only — so cgo
-      # can't find ykpers-1/ykcore.h or openssl/ec.h without pointing at them
-      # explicitly. Linux needs nothing extra (/usr/include is searched).
-      - name: Build
+      # Cache the built static-dep prefix, keyed on the build script (bumping a
+      # pinned version in it changes the hash → clean rebuild). Cold build is a few
+      # minutes (openssl dominates); warm cache is instant via the script's marker.
+      - name: Cache static deps (macOS)
+        if: matrix.os == 'macos'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/deps
+          key: macos-static-deps-${{ matrix.asset }}-${{ hashFiles('scripts/build-macos-static-deps.sh') }}
+
+      - name: Build static deps (macOS)
+        if: matrix.os == 'macos'
+        run: PREFIX="${{ runner.temp }}/deps" bash scripts/build-macos-static-deps.sh
+
+      # Linux stays a dynamic build (distro libs); keep the fido2→ykpers fallback.
+      - name: Build (Linux)
+        if: matrix.os == 'linux'
         run: |
-          if [ "${{ matrix.os }}" = "macos" ]; then
-            BREW="$(brew --prefix)"
-            SSL="$(brew --prefix openssl@3)"
-            YK="$(brew --prefix ykpers)"
-            export PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$BREW/share/pkgconfig:$SSL/lib/pkgconfig:$YK/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-            export CGO_CFLAGS="-I$BREW/include -I$SSL/include -I$YK/include"
-            export CGO_LDFLAGS="-L$BREW/lib -L$SSL/lib -L$YK/lib"
-          fi
           make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
           || make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=
+
+      # macOS static build: point cgo's pkg-config at the static-only prefix (so
+      # `.2`'s `#cgo darwin pkg-config: libfido2` and icfx's `ykpers-1` resolve to
+      # the .a), and append the provider chain + -lobjc (libusb) explicitly. No
+      # `-static` flag (fails on macOS) and no `|| TAGS=` fallback — a ykpers-only
+      # fallback would still be dynamic and still not run on a Homebrew-free Mac.
+      - name: Build (macOS, static third-party libs)
+        if: matrix.os == 'macos'
+        env:
+          PREFIX: ${{ runner.temp }}/deps
+        run: |
+          set -eo pipefail
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+          export CGO_CFLAGS="-I$PREFIX/include"
+          export CGO_LDFLAGS="-L$PREFIX/lib -lcbor -lcrypto -lyubikey -ljson-c -lusb-1.0 -lz -lobjc"
+          make build TAGS=fido2 BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
+
+      # Assert self-containment: every dylib dep must be a macOS system library
+      # (/usr/lib/* or a /System/Library framework). A /opt/homebrew, /usr/local,
+      # or private-prefix path means a third-party dylib leaked in.
+      - name: Verify no non-system dylib deps (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          set -eo pipefail
+          otool -L ${{ matrix.asset }} | tee otool.txt
+          bad="$(otool -L ${{ matrix.asset }} | tail -n +2 | awk '{print $1}' \
+                 | grep -vE '^/usr/lib/|^/System/Library/' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::icc has non-system dynamic library dependencies:"; echo "$bad"
+            exit 1
+          fi
+          echo "OK: only macOS system libraries/frameworks referenced."
 
       - uses: actions/upload-artifact@v6
         with:
@@ -88,7 +122,14 @@ jobs:
           path: ${{ matrix.asset }}
           if-no-files-found: error
 
-  # --- Windows via MSYS2: amd64 (MINGW64) + arm64 (CLANGARM64) ---------------
+  # --- Windows via MSYS2: amd64 (MINGW64), fully static ----------------------
+  # The shipped binary is a bare .exe with no installer, so it must be
+  # self-contained: we STATICALLY link libfido2/ykpers/openssl/cbor AND the
+  # mingw runtime (libgcc/libwinpthread) so a stock Windows box needs no DLLs.
+  # MSYS2 ships a static .a for every dep except libcbor, which we build from
+  # source (matching MSYS2's exact version to stay ABI-compatible with the
+  # installed libfido2.a). windows-arm64 is dropped: Windows-on-ARM runs the
+  # amd64 binary under emulation, and clangarm64 static libs are unverified.
   build-windows:
     name: build ${{ matrix.asset }}
     runs-on: ${{ matrix.runner }}
@@ -101,11 +142,6 @@ jobs:
             msystem: MINGW64
             prefix: mingw-w64-x86_64
             cc: gcc
-          - asset: icc-windows-arm64
-            runner: windows-11-arm
-            msystem: CLANGARM64
-            prefix: mingw-w64-clang-aarch64
-            cc: clang
     defaults:
       run:
         shell: msys2 {0}
@@ -114,7 +150,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # MSYS2's own Go + toolchain so cgo links against the mingw/clang libs.
+      # MSYS2's own Go + toolchain so cgo links against the mingw libs. Beyond
+      # libfido2 + ykpers we need the whole static dep closure (openssl, cbor's
+      # deps, json-c, libusb, zlib, yubico-c), cmake/ninja to build static
+      # libcbor, and ntldd to verify the result has no non-system DLL deps.
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
@@ -125,12 +164,56 @@ jobs:
             ${{ matrix.prefix }}-pkgconf
             ${{ matrix.prefix }}-yubikey-personalization
             ${{ matrix.prefix }}-libfido2
+            ${{ matrix.prefix }}-yubico-c
+            ${{ matrix.prefix }}-openssl
+            ${{ matrix.prefix }}-json-c
+            ${{ matrix.prefix }}-zlib
+            ${{ matrix.prefix }}-libusb
+            ${{ matrix.prefix }}-cmake
+            ${{ matrix.prefix }}-ninja
+            ${{ matrix.prefix }}-ntldd-git
             make git
 
-      - name: Build
+      # MSYS2 ships libcbor as an import lib only (no static .a). Build it from
+      # source at the SAME version MSYS2 installed (libfido2.a was compiled
+      # against those headers) and install the static .a into /mingw64 alongside
+      # the rest; -static then prefers the .a over the .dll.a.
+      - name: Build static libcbor
         run: |
-          make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
-          || make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=
+          set -eo pipefail
+          CBOR_VER="$(pacman -Q ${{ matrix.prefix }}-libcbor | awk '{print $2}' | cut -d- -f1)"
+          echo "Building static libcbor v${CBOR_VER} to match MSYS2's libfido2.a"
+          git clone --depth 1 --branch "v${CBOR_VER}" https://github.com/PJK/libcbor
+          cmake -S libcbor -B libcbor/build -G Ninja \
+            -DBUILD_SHARED_LIBS=OFF -DWITH_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX=/mingw64 -DCMAKE_BUILD_TYPE=Release
+          cmake --build libcbor/build --target install
+          test -f /mingw64/lib/libcbor.a
+
+      # Fully static build. pkg-config supplies the -lfido2 / -lykpers-1
+      # consumers; CGO_LDFLAGS appends -static plus the provider chain and the
+      # Windows system libs the .pc files under-declare (crypt32, ws2_32, etc.),
+      # consumer-before-provider. No `|| TAGS=` fallback: fido2 must build, and a
+      # ykpers-only fallback would still be dynamic (libykpers) and still broken.
+      - name: Build (static)
+        run: |
+          set -eo pipefail
+          export CGO_LDFLAGS="-static -L/mingw64/lib \
+            -lfido2 -lykpers-1 -lyubikey -lcbor -lusb-1.0 -ljson-c -lssl -lcrypto -lz \
+            -lsetupapi -lhid -lcfgmgr32 -lwinusb -lole32 -lbcrypt -lcrypt32 -lws2_32 -ladvapi32"
+          make build STATIC=1 TAGS=fido2 BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
+
+      # Assert self-containment: ntldd must resolve ONLY Windows system DLLs.
+      # Any mingw/msys runtime or third-party DLL means a dep leaked in.
+      - name: Verify no non-system DLL deps
+        run: |
+          set -eo pipefail
+          ntldd -R ${{ matrix.asset }} | tee ntldd.txt
+          if grep -iE 'mingw|msys|clang|libgcc|libwinpthread|libfido2|libcbor|libcrypto|libssl|libykpers|libyubikey|libusb|libjson|zlib1|libstdc' ntldd.txt; then
+            echo "::error::icc.exe has non-system DLL dependencies — not self-contained"
+            exit 1
+          fi
+          echo "OK: only Windows system DLLs referenced."
 
       - uses: actions/upload-artifact@v6
         with:
@@ -155,12 +238,24 @@ jobs:
       - name: Build in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
+          # Pin to FreeBSD 14.x (the action's default is 15.x — DEFAULT_RELEASE
+          # 15.1). A 15-built binary will NOT run on FreeBSD 14 (major-version ABI
+          # bump, no forward shim), and lots of production hosts are still on 14. A
+          # 14-built binary runs on BOTH 14 and 15 (COMPAT_FREEBSD14 + libc symbol
+          # versioning), so 14 is the right single target. 14.3 is the newest 14.x
+          # image vmactions publishes (no 14.4 image exists) and has both x86_64 and
+          # aarch64 — and it still covers 14.4 hosts (same-major ABI; pkg's ABI tag
+          # is per-major FreeBSD:14, so it installs current 14-branch packages).
+          release: "14.3"
           arch: ${{ matrix.arch }}
           usesh: true
           # Forward the release tag into the guest (host env isn't inherited).
           envs: 'TAG'
-          # BSD make can't parse the GNU-make Makefile — use gmake.
+          # BSD make can't parse the GNU-make Makefile — use gmake. `pkg update`
+          # first: a pinned image defaults to the quarterly branch, which can serve
+          # a stale index.
           prepare: |
+            pkg update -f
             pkg install -y go gmake pkgconf git ykpers libfido2
           run: |
             # Resolve a usable pkg-config (OpenBSD ships its own; pkgconf provides

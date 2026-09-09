@@ -4,11 +4,23 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# STATIC=1 links the C dependencies (libfido2/ykpers/openssl/cbor + the toolchain
+# runtime) into the binary via the external linker, so the shipped `icc` has no
+# non-system shared-library deps. Used by the release CI on Windows (which can go
+# fully static: -extldflags -static). NOT for macOS — Apple ships no static
+# libSystem, so the mac build instead points cgo at a static-only dep prefix and
+# leaves this at 0 (see .github/workflows/release.yml). Default 0 = normal dynamic.
+STATIC ?= 0
+ifeq ($(STATIC),1)
+  STATIC_LDFLAGS := -linkmode external -extldflags '-static'
+endif
+
 # -s -w strip the symbol table and DWARF debug info for smaller release binaries.
 LDFLAGS := -ldflags "-s -w \
 	-X '$(MODULE)/internal/cli.Version=$(VERSION)' \
 	-X '$(MODULE)/internal/cli.CommitSHA=$(COMMIT)' \
-	-X '$(MODULE)/internal/cli.BuildDate=$(DATE)'"
+	-X '$(MODULE)/internal/cli.BuildDate=$(DATE)' \
+	$(STATIC_LDFLAGS)"
 
 # Build tags. Defaults to fido2 (hardware-key/WebAuthn support), which needs
 # libfido2 installed. On a machine without libfido2 (CI, etc.) build without it:

@@ -1,5 +1,16 @@
 # CHANGELOG
 
+**v0.1.2 - 09-09-2026**
+
+- Bumped icfx to v0.1.4
+- Added static knob to build
+- Added Windows static build in GA
+- Added macOS static build in GA
+- Droped Windows arm64 build in GA
+- Added Gatekeeper detect+prompt in install.sh
+- Changed to build FreeBSD builds with FreeBSD 14.3
+
+
 **v0.1.1 - 09-07-2026**
 
 - ChalResp setup flow fix

@@ -182,6 +182,36 @@ $USE_SUDO mv "$TMP" "$DEST"
 trap - EXIT
 say ""
 
+# --- 5b. macOS Gatekeeper quarantine (detect, then ASK — never silent) -----
+# A binary fetched with curl/wget is normally NOT quarantined, so this is usually
+# a no-op. But a browser/AirDrop download would be, and clearing the quarantine
+# flag is a Gatekeeper bypass — so we only act when the flag is actually present,
+# and only with the user's explicit consent (default: leave it in place). Under a
+# non-interactive `curl | bash` run, ask() returns the default and we just print
+# the manual command instead of stripping anything.
+if [ "$OS" = "macos" ] && command -v xattr >/dev/null 2>&1 \
+   && xattr -p com.apple.quarantine "$DEST" >/dev/null 2>&1; then
+  say "${BOLD}macOS Gatekeeper${RESET} has quarantined ${DEST}."
+  say "Clearing the quarantine flag lets ${BOLD}icc${RESET} run without a Gatekeeper block."
+  GK="$(ask "Clear the quarantine flag now? [y/N]: " "n")"
+  case "$GK" in
+    y|Y|yes|YES)
+      if $USE_SUDO xattr -dr com.apple.quarantine "$DEST" 2>/dev/null; then
+        say "   Quarantine flag cleared."
+      else
+        err "   Could not clear it automatically. Run this yourself:"
+        say "     ${BOLD}xattr -dr com.apple.quarantine \"${DEST}\"${RESET}"
+      fi
+      ;;
+    *)
+      say "   Left the quarantine flag in place. If macOS blocks icc, either run:"
+      say "     ${BOLD}xattr -dr com.apple.quarantine \"${DEST}\"${RESET}"
+      say "   or right-click icc in Finder and choose Open the first time."
+      ;;
+  esac
+  say ""
+fi
+
 # --- 6. done ---------------------------------------------------------------
 printf '%s\n' "${BRAND}${BOLD}** Installation Completed **${RESET}"
 say "   ${BOLD}icc${RESET} installed to ${DEST}"
