@@ -184,10 +184,16 @@ jobs:
           CBOR_VER="$(pacman -Q ${{ matrix.prefix }}-libcbor | awk '{print $2}' | cut -d- -f1)"
           echo "Building static libcbor v${CBOR_VER} to match MSYS2's libfido2.a"
           git clone --depth 1 --branch "v${CBOR_VER}" https://github.com/PJK/libcbor
-          cmake -S libcbor -B libcbor/build -G Ninja \
+          # Build OUT of source (cbor-build, not libcbor/build): recent libcbor
+          # ships a Bazel `BUILD` file that case-collides with `build` on Windows'
+          # case-insensitive NTFS. CMAKE_POLICY_VERSION_MINIMUM=3.5: MSYS2's CMake
+          # 4.x rejects libcbor's old cmake_minimum_required(<3.5); this floor lets
+          # it configure.
+          cmake -S libcbor -B cbor-build -G Ninja \
             -DBUILD_SHARED_LIBS=OFF -DWITH_EXAMPLES=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_PREFIX=/mingw64 -DCMAKE_BUILD_TYPE=Release
-          cmake --build libcbor/build --target install
+          cmake --build cbor-build --target install
           test -f /mingw64/lib/libcbor.a
 
       # Fully static build. pkg-config supplies the -lfido2 / -lykpers-1
@@ -251,10 +257,16 @@ jobs:
           usesh: true
           # Forward the release tag into the guest (host env isn't inherited).
           envs: 'TAG'
-          # BSD make can't parse the GNU-make Makefile — use gmake. `pkg update`
-          # first: a pinned image defaults to the quarterly branch, which can serve
-          # a stale index.
+          # BSD make can't parse the GNU-make Makefile — use gmake.
+          #
+          # IGNORE_OSVERSION: the FreeBSD:14 pkg repo is per-major and built on the
+          # newest 14.x (14.4, OSVERSION 1404000), but this VM runs 14.3 (1403000),
+          # so pkg's OSVERSION guard refuses the repo (and the [y/N] prompt defaults
+          # to N non-interactively → hard fail). The packages are ABI-compatible
+          # within the 14 major, and our binary is still built against the 14.3
+          # userland (stays compatible with all 14.x + forward to 15), so proceed.
           prepare: |
+            export IGNORE_OSVERSION=yes
             pkg update -f
             pkg install -y go gmake pkgconf git ykpers libfido2
           run: |

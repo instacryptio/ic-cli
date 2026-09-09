@@ -49,11 +49,17 @@ fetch() { echo "==> fetch $1"; curl -fsSL "$1" -o "$2"; }
 
 cmake_static() { # <srcdir> [extra cmake args...]
   local src="$1"; shift
-  cmake -S "$src" -B "$src/build" -G "Unix Makefiles" \
+  # Build OUT of source ("${src}-build", not "$src/build"): recent libcbor ships a
+  # Bazel `BUILD` file that case-collides with `build` on case-insensitive APFS.
+  # CMAKE_POLICY_VERSION_MINIMUM=3.5: CMake 4.x removed support for projects that
+  # declare cmake_minimum_required(VERSION <3.5) (libcbor/json-c do). This floor
+  # lets them configure; harmless for projects already requiring >=3.5.
+  cmake -S "$src" -B "${src}-build" -G "Unix Makefiles" \
     -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" "$@"
-  cmake --build "$src/build" -j "$JOBS" --target install
+  cmake --build "${src}-build" -j "$JOBS" --target install
 }
 
 autotools_static() { # <srcdir> [extra configure args...]
