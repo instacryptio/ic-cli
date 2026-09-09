@@ -108,7 +108,7 @@ cmake_static "libfido2-${LIBFIDO2_VER}" \
 # 7. ykpers (autotools) — needs libyubikey + json-c + libusb (all in $PREFIX)
 fetch "https://developers.yubico.com/yubikey-personalization/Releases/ykpers-${YKPERS_VER}.tar.gz" ykpers.tgz
 tar xf ykpers.tgz
-autotools_static "ykpers-${YKPERS_VER}" --with-backend=libusb
+autotools_static "ykpers-${YKPERS_VER}" --with-backend=libusb-1.0
 
 touch "$MARKER"
 echo "== static dep prefix ready: $PREFIX =="

@@ -200,6 +200,27 @@ jobs:
           cmake --install cbor-build
           test -f /mingw64/lib/libcbor.a
 
+      # MSYS2's prebuilt libfido2.a was compiled against libcbor-as-a-DLL, so its
+      # objects reference dllimport stubs (__imp_cbor_*) that can't resolve against
+      # a static libcbor.a. Rebuild libfido2 from source (same version) with
+      # -DCBOR_STATIC_DEFINE so it emits plain cbor_* symbols, and install the
+      # static .a over MSYS2's. (Everything else — ykpers/json-c/openssl/yubico —
+      # links fine from MSYS2's .a; only the cbor export macro is the problem.)
+      - name: Build static libfido2
+        run: |
+          set -eo pipefail
+          FIDO_VER="$(pacman -Q ${{ matrix.prefix }}-libfido2 | awk '{print $2}' | cut -d- -f1)"
+          echo "Building static libfido2 v${FIDO_VER} against static libcbor"
+          git clone --depth 1 --branch "${FIDO_VER}" https://github.com/Yubico/libfido2
+          cmake -S libfido2 -B fido-build -G Ninja \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_MANPAGES=OFF \
+            -DBUILD_TOOLS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_C_FLAGS="-DCBOR_STATIC_DEFINE" \
+            -DCMAKE_INSTALL_PREFIX=/mingw64 -DCMAKE_BUILD_TYPE=Release
+          cmake --build fido-build
+          cmake --install fido-build
+          test -f /mingw64/lib/libfido2.a
+
       # Fully static build. pkg-config supplies the -lfido2 / -lykpers-1
       # consumers; CGO_LDFLAGS appends -static plus the provider chain and the
       # Windows system libs the .pc files under-declare (crypt32, ws2_32, etc.),
