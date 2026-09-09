@@ -110,7 +110,13 @@ cmake_static "libfido2-${LIBFIDO2_VER}" \
 # define them ourselves (they're genuinely undefined now → no conflict).
 fetch "https://developers.yubico.com/yubikey-personalization/Releases/ykpers-${YKPERS_VER}.tar.gz" ykpers.tgz
 tar xf ykpers.tgz
-autotools_static "ykpers-${YKPERS_VER}" --with-backend=libusb-1.0 'CPPFLAGS=-DTRUE=1 -DFALSE=0'
+# ykpers also builds CLI tools (ykpersonalize/ykchalresp/ykinfo) we don't use, but
+# `make` links them — and the static libusb-1.0 darwin backend needs the macOS
+# frameworks (CoreFoundation/IOKit/Security + -lobjc), so pass them via LDFLAGS or
+# those tool links fail. (The library itself, libykpers-1.a, is all we consume.)
+autotools_static "ykpers-${YKPERS_VER}" --with-backend=libusb-1.0 \
+  'CPPFLAGS=-DTRUE=1 -DFALSE=0' \
+  'LDFLAGS=-framework CoreFoundation -framework IOKit -framework Security -lobjc'
 
 touch "$MARKER"
 echo "== static dep prefix ready: $PREFIX =="

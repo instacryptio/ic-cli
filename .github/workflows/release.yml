@@ -97,7 +97,11 @@ jobs:
           set -eo pipefail
           export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
           export CGO_CFLAGS="-I$PREFIX/include"
-          export CGO_LDFLAGS="-L$PREFIX/lib -lcbor -lcrypto -lyubikey -ljson-c -lusb-1.0 -lz -lobjc"
+          # Providers + -lobjc (libusb) + the macOS frameworks the static libusb/
+          # libfido2 darwin backends need (CoreFoundation/IOKit/Security). No -static
+          # (fails on macOS): the .a-only prefix already forces static third-party libs.
+          export CGO_LDFLAGS="-L$PREFIX/lib -lcbor -lcrypto -lyubikey -ljson-c -lusb-1.0 -lz -lobjc \
+            -framework CoreFoundation -framework IOKit -framework Security"
           make build TAGS=fido2 BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
 
       # Assert self-containment: every dylib dep must be a macOS system library
