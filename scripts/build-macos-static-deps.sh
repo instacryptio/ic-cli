@@ -59,7 +59,10 @@ cmake_static() { # <srcdir> [extra cmake args...]
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_PREFIX_PATH="$PREFIX" "$@"
-  cmake --build "${src}-build" -j "$JOBS" --target install
+  # Build THEN install (two steps): a combined `--target install` doesn't compile
+  # first, so it installs headers but never builds the .a.
+  cmake --build "${src}-build" -j "$JOBS"
+  cmake --install "${src}-build"
 }
 
 autotools_static() { # <srcdir> [extra configure args...]

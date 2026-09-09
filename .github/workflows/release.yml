@@ -193,7 +193,11 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF -DWITH_EXAMPLES=OFF \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_PREFIX=/mingw64 -DCMAKE_BUILD_TYPE=Release
-          cmake --build cbor-build --target install
+          # Build THEN install as two steps: `ninja install` does not build the
+          # project first, so a combined --target install installs headers but
+          # never compiles libcbor.a.
+          cmake --build cbor-build
+          cmake --install cbor-build
           test -f /mingw64/lib/libcbor.a
 
       # Fully static build. pkg-config supplies the -lfido2 / -lykpers-1
