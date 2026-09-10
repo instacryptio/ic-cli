@@ -87,7 +87,28 @@ case "$UNAME_M" in
     ;;
 esac
 
-ASSET="${BINARY}-${OS}-${ARCH}"
+# OpenBSD has no cross-release binary ABI (CGO links versioned libs; libc syscall
+# pinning), so icc is built per release — pick the build matching this host, and bail
+# clearly (before any download) on a release we don't publish a binary for.
+REL=""
+if [ "$OS" = "openbsd" ]; then
+  OBSD_REL="$(uname -r)"                 # e.g. 7.9
+  # Keep in sync with the build-openbsd matrix in .github/workflows/release.yml.
+  OBSD_SUPPORTED="7.8 7.9"
+  case " ${OBSD_SUPPORTED} " in
+    *" ${OBSD_REL} "*) REL="-${OBSD_REL}" ;;
+    *)
+      err "OpenBSD ${OBSD_REL} is not supported (prebuilt binaries exist for: ${OBSD_SUPPORTED}).
+OpenBSD gives no cross-release binary compatibility, so icc ships one build per release.
+Upgrade to a supported release, or build from source:
+  pkg_add gmake pkgconf git libfido2 libusb1 libiconv pcsc-lite
+  git clone https://github.com/${REPO} && cd ic-cli && gmake build
+(See the release workflow's build-openbsd job for the exact CGO_CFLAGS/LDFLAGS.)"
+      exit 1
+      ;;
+  esac
+fi
+ASSET="${BINARY}-${OS}${REL}-${ARCH}"
 say "   Platform: ${BOLD}${OS}/${ARCH}${RESET}"
 say ""
 

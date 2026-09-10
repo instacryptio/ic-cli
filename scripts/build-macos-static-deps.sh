@@ -4,9 +4,11 @@
 # Homebrew installed.
 #
 # A *fully* static macOS binary is impossible — Apple ships no static libSystem —
-# so the target is "third-party static, system dynamic": libfido2/ykpers/openssl/
-# cbor + their deps become .a archives here, while the always-present macOS system
-# pieces (libSystem, CoreFoundation, IOKit, Security, libz) stay dynamic. Every
+# so the target is "third-party static, system dynamic": libfido2 + its deps
+# (openssl, libcbor) become .a archives here, while the always-present macOS system
+# pieces (libSystem, CoreFoundation, IOKit, Security, PCSC, libz) stay dynamic.
+# (chalresp's go-hid and the pcsc backend's scard link only those system pieces —
+# no third-party lib to build.) Every
 # lib installs with --disable-shared / BUILD_SHARED_LIBS=OFF so ONLY .a archives
 # land in $PREFIX (no .dylib for the runtime to resolve); the release build then
 # points cgo's pkg-config at $PREFIX, and because nothing but .a is present the
@@ -22,15 +24,10 @@ PREFIX="${PREFIX:?set PREFIX to the install dir}"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 # Pinned dependency versions. If a first CI run 404s or a tag drifts, adjust here.
-# Sources: openssl/libcbor/libusb via GitHub releases; libyubikey/ykpers/libfido2
-# via developers.yubico.com; json-c via its S3 release bucket.
+# Sources: openssl/libcbor via GitHub releases; libfido2 via developers.yubico.com.
 OPENSSL_VER="${OPENSSL_VER:-3.4.0}"
 LIBCBOR_VER="${LIBCBOR_VER:-0.11.0}"
-LIBYUBIKEY_VER="${LIBYUBIKEY_VER:-1.13}"
-JSONC_VER="${JSONC_VER:-0.18}"
-LIBUSB_VER="${LIBUSB_VER:-1.0.30}"
 LIBFIDO2_VER="${LIBFIDO2_VER:-1.15.0}"
-YKPERS_VER="${YKPERS_VER:-1.20.0}"
 
 MARKER="$PREFIX/.icc-static-deps-ok"
 if [ -f "$MARKER" ]; then
@@ -52,7 +49,7 @@ cmake_static() { # <srcdir> [extra cmake args...]
   # Build OUT of source ("${src}-build", not "$src/build"): recent libcbor ships a
   # Bazel `BUILD` file that case-collides with `build` on case-insensitive APFS.
   # CMAKE_POLICY_VERSION_MINIMUM=3.5: CMake 4.x removed support for projects that
-  # declare cmake_minimum_required(VERSION <3.5) (libcbor/json-c do). This floor
+  # declare cmake_minimum_required(VERSION <3.5) (libcbor does). This floor
   # lets them configure; harmless for projects already requiring >=3.5.
   cmake -S "$src" -B "${src}-build" -G "Unix Makefiles" \
     -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release \
@@ -84,39 +81,13 @@ fetch "https://github.com/PJK/libcbor/archive/refs/tags/v${LIBCBOR_VER}.tar.gz" 
 tar xf libcbor.tgz
 cmake_static "libcbor-${LIBCBOR_VER}" -DWITH_EXAMPLES=OFF
 
-# 3. libyubikey / yubico-c (autotools, no deps)
-fetch "https://developers.yubico.com/yubico-c/Releases/libyubikey-${LIBYUBIKEY_VER}.tar.gz" libyubikey.tgz
-tar xf libyubikey.tgz
-autotools_static "libyubikey-${LIBYUBIKEY_VER}"
-
-# 4. json-c (cmake, no deps)
-fetch "https://s3.amazonaws.com/json-c_releases/releases/json-c-${JSONC_VER}.tar.gz" jsonc.tgz
-tar xf jsonc.tgz
-cmake_static "json-c-${JSONC_VER}" -DBUILD_TESTING=OFF -DDISABLE_WERROR=ON
-
-# 5. libusb (autotools; uses IOKit/CoreFoundation at link time)
-fetch "https://github.com/libusb/libusb/releases/download/v${LIBUSB_VER}/libusb-${LIBUSB_VER}.tar.bz2" libusb.tbz2
-tar xf libusb.tbz2
-autotools_static "libusb-${LIBUSB_VER}"
-
-# 6. libfido2 (cmake) — needs libcbor + openssl (both in $PREFIX) + zlib (SDK)
+# 3. libfido2 (cmake) — needs libcbor + openssl (both in $PREFIX) + zlib (SDK).
+# On macOS libfido2 uses the native IOKit HID backend (no libusb). BUILD_TOOLS=OFF
+# skips the CLI tools we don't ship.
 fetch "https://developers.yubico.com/libfido2/Releases/libfido2-${LIBFIDO2_VER}.tar.gz" libfido2.tgz
 tar xf libfido2.tgz
 cmake_static "libfido2-${LIBFIDO2_VER}" \
   -DBUILD_EXAMPLES=OFF -DBUILD_MANPAGES=OFF -DBUILD_TOOLS=OFF
-
-# 7. ykpers (autotools) — needs libyubikey + json-c + libusb (all in $PREFIX).
-# ykpers-json.c uses TRUE/FALSE, which json-c >=0.14 removed (we build 0.18), so
-# define them ourselves (they're genuinely undefined now → no conflict).
-fetch "https://developers.yubico.com/yubikey-personalization/Releases/ykpers-${YKPERS_VER}.tar.gz" ykpers.tgz
-tar xf ykpers.tgz
-# ykpers also builds CLI tools (ykpersonalize/ykchalresp/ykinfo) we don't use, but
-# `make` links them — and the static libusb-1.0 darwin backend needs the macOS
-# frameworks (CoreFoundation/IOKit/Security + -lobjc), so pass them via LDFLAGS or
-# those tool links fail. (The library itself, libykpers-1.a, is all we consume.)
-autotools_static "ykpers-${YKPERS_VER}" --with-backend=libusb-1.0 \
-  'CPPFLAGS=-DTRUE=1 -DFALSE=0' \
-  'LDFLAGS=-framework CoreFoundation -framework IOKit -framework Security -lobjc'
 
 touch "$MARKER"
 echo "== static dep prefix ready: $PREFIX =="

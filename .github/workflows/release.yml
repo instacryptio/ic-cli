@@ -2,8 +2,10 @@ name: Release
 
 # Build the icc binary for all supported platforms and attach them to a
 # published GitHub Release. Every target is a native (or VM-native) cgo build
-# WITH YubiKey hardware-key support — the C library (libykpers-1) and a runner
-# exist for each, so no target falls back to a feature-reduced pure-Go build.
+# WITH hardware-key support: challenge-response over HID via go-hid (vendors the
+# hidapi C source — needs only libudev on Linux, system frameworks on macOS,
+# nothing at link time on Windows), FIDO2 via libfido2, and PC/SC (Nitrokey 3)
+# via ebfe/scard. No target falls back to a feature-reduced pure-Go build.
 #
 # Trigger: publishing a Release via the GitHub web UI. workflow_dispatch is also
 # offered so a build can be re-run against an existing tag/release for testing
@@ -47,16 +49,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # go-hid's Linux hidraw backend links libudev (libudev-dev); fido2 needs
+      # libfido2-dev; the pcsc backend (ebfe/scard) needs libpcsclite-dev. ykpers
+      # is gone (chalresp is go-hid now).
       - name: Install native deps (Linux)
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libykpers-1-dev libfido2-dev
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libfido2-dev libpcsclite-dev
 
       # macOS ships `icc` as a bare binary, so it must be self-contained: we build
-      # libfido2/ykpers/openssl/cbor + deps as STATIC libs from source into a
+      # libfido2 + its deps (openssl, libcbor) as STATIC libs from source into a
       # private prefix and link those, leaving only the always-present macOS system
-      # frameworks dynamic. Here we just need the build tools; the heavy lifting is
-      # the cached dep build below. (untap aws/tap to keep a security product's
-      # build logs free of the runner's "untrusted tap" warning.)
+      # frameworks dynamic. go-hid (chalresp) and scard (pcsc) use system frameworks
+      # (IOKit/CoreFoundation, PCSC) — nothing to build. Here we just need the build
+      # tools; the heavy lifting is the cached dep build below. (untap aws/tap to keep
+      # a security product's build logs free of the runner's "untrusted tap" warning.)
       - name: Install build tools (macOS)
         if: matrix.os == 'macos'
         run: |
@@ -77,18 +83,22 @@ jobs:
         if: matrix.os == 'macos'
         run: PREFIX="${{ runner.temp }}/deps" bash scripts/build-macos-static-deps.sh
 
-      # Linux stays a dynamic build (distro libs); keep the fido2→ykpers fallback.
+      # Linux stays a dynamic build (distro libs). Fallback drops to `nohw` (not
+      # empty tags): post-migration, empty TAGS still compiles the C-linked HW
+      # backends, so only `nohw` yields a pure-Go build if a C dep is missing.
       - name: Build (Linux)
         if: matrix.os == 'linux'
         run: |
-          make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
-          || make build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=
+          make build TAGS="fido2 pcsc" BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
+          || make build TAGS=nohw BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
 
       # macOS static build: point cgo's pkg-config at the static-only prefix (so
-      # `.2`'s `#cgo darwin pkg-config: libfido2` and icfx's `ykpers-1` resolve to
-      # the .a), and append the provider chain + -lobjc (libusb) explicitly. No
-      # `-static` flag (fails on macOS) and no `|| TAGS=` fallback — a ykpers-only
-      # fallback would still be dynamic and still not run on a Homebrew-free Mac.
+      # `.2`'s `#cgo darwin pkg-config: libfido2` resolves to the .a), and append
+      # libfido2's provider chain (cbor/crypto/z) + the macOS frameworks the static
+      # libfido2 darwin backend, go-hid (IOKit/CoreFoundation), and scard (PCSC) need.
+      # No `-static` (fails on macOS): the .a-only prefix already forces static
+      # third-party libs. No `|| TAGS=` fallback — a reduced fallback would still be
+      # dynamic and still not run on a Homebrew-free Mac.
       - name: Build (macOS, static third-party libs)
         if: matrix.os == 'macos'
         env:
@@ -97,12 +107,9 @@ jobs:
           set -eo pipefail
           export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
           export CGO_CFLAGS="-I$PREFIX/include"
-          # Providers + -lobjc (libusb) + the macOS frameworks the static libusb/
-          # libfido2 darwin backends need (CoreFoundation/IOKit/Security). No -static
-          # (fails on macOS): the .a-only prefix already forces static third-party libs.
-          export CGO_LDFLAGS="-L$PREFIX/lib -lcbor -lcrypto -lyubikey -ljson-c -lusb-1.0 -lz -lobjc \
-            -framework CoreFoundation -framework IOKit -framework Security"
-          make build TAGS=fido2 BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
+          export CGO_LDFLAGS="-L$PREFIX/lib -lcbor -lcrypto -lz \
+            -framework CoreFoundation -framework IOKit -framework Security -framework PCSC"
+          make build TAGS="fido2 pcsc" BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
 
       # Assert self-containment: every dylib dep must be a macOS system library
       # (/usr/lib/* or a /System/Library framework). A /opt/homebrew, /usr/local,
@@ -128,11 +135,12 @@ jobs:
 
   # --- Windows via MSYS2: amd64 (MINGW64), fully static ----------------------
   # The shipped binary is a bare .exe with no installer, so it must be
-  # self-contained: we STATICALLY link libfido2/ykpers/openssl/cbor AND the
-  # mingw runtime (libgcc/libwinpthread) so a stock Windows box needs no DLLs.
-  # MSYS2 ships a static .a for every dep except libcbor, which we build from
-  # source (matching MSYS2's exact version to stay ABI-compatible with the
-  # installed libfido2.a). windows-arm64 is dropped: Windows-on-ARM runs the
+  # self-contained: we STATICALLY link libfido2/openssl/cbor AND the mingw runtime
+  # (libgcc/libwinpthread) so a stock Windows box needs no DLLs. chalresp (go-hid)
+  # and pcsc (scard) bind hid.dll/cfgmgr32.dll/winscard.dll at RUNTIME — system
+  # DLLs, nothing to link. MSYS2 ships a static .a for every dep except libcbor,
+  # which we build from source (matching MSYS2's exact version to stay ABI-compatible
+  # with the installed libfido2.a). windows-arm64 is dropped: Windows-on-ARM runs the
   # amd64 binary under emulation, and clangarm64 static libs are unverified.
   build-windows:
     name: build ${{ matrix.asset }}
@@ -154,10 +162,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # MSYS2's own Go + toolchain so cgo links against the mingw libs. Beyond
-      # libfido2 + ykpers we need the whole static dep closure (openssl, cbor's
-      # deps, json-c, libusb, zlib, yubico-c), cmake/ninja to build static
-      # libcbor, and ntldd to verify the result has no non-system DLL deps.
+      # MSYS2's own Go + toolchain so cgo links against the mingw libs. We need
+      # libfido2 + its static dep closure (openssl, cbor's deps, zlib), cmake/ninja
+      # to build static libcbor, and ntldd to verify no non-system DLL deps. go-hid
+      # links nothing at build time (runtime LoadLibrary of hid.dll/cfgmgr32.dll) and
+      # scard is pure-Go (winscard.dll via LazyDLL) — so ykpers/yubico-c/libusb/json-c
+      # are gone.
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
@@ -166,13 +176,9 @@ jobs:
             ${{ matrix.prefix }}-go
             ${{ matrix.prefix }}-${{ matrix.cc }}
             ${{ matrix.prefix }}-pkgconf
-            ${{ matrix.prefix }}-yubikey-personalization
             ${{ matrix.prefix }}-libfido2
-            ${{ matrix.prefix }}-yubico-c
             ${{ matrix.prefix }}-openssl
-            ${{ matrix.prefix }}-json-c
             ${{ matrix.prefix }}-zlib
-            ${{ matrix.prefix }}-libusb
             ${{ matrix.prefix }}-cmake
             ${{ matrix.prefix }}-ninja
             ${{ matrix.prefix }}-ntldd-git
@@ -208,8 +214,8 @@ jobs:
       # objects reference dllimport stubs (__imp_cbor_*) that can't resolve against
       # a static libcbor.a. Rebuild libfido2 from source (same version) with
       # -DCBOR_STATIC_DEFINE so it emits plain cbor_* symbols, and install the
-      # static .a over MSYS2's. (Everything else — ykpers/json-c/openssl/yubico —
-      # links fine from MSYS2's .a; only the cbor export macro is the problem.)
+      # static .a over MSYS2's. (openssl/zlib link fine from MSYS2's .a; only the
+      # cbor export macro is the problem.)
       - name: Build static libfido2
         run: |
           set -eo pipefail
@@ -225,18 +231,19 @@ jobs:
           cmake --install fido-build
           test -f /mingw64/lib/libfido2.a
 
-      # Fully static build. pkg-config supplies the -lfido2 / -lykpers-1
-      # consumers; CGO_LDFLAGS appends -static plus the provider chain and the
-      # Windows system libs the .pc files under-declare (crypt32, ws2_32, etc.),
-      # consumer-before-provider. No `|| TAGS=` fallback: fido2 must build, and a
-      # ykpers-only fallback would still be dynamic (libykpers) and still broken.
+      # Fully static build. pkg-config supplies the -lfido2 consumer; CGO_LDFLAGS
+      # appends -static plus libfido2's provider chain (cbor/ssl/crypto/z) and the
+      # Windows system libs the .pc files under-declare. setupapi/hid/cfgmgr32 serve
+      # go-libfido2 (-lhid -lsetupapi) and go-hid's runtime LoadLibrary targets;
+      # winscard (scard/pcsc) is pure-Go, resolved at runtime — nothing to link.
+      # No `|| TAGS=` fallback: the HW backends must build on Windows.
       - name: Build (static)
         run: |
           set -eo pipefail
           export CGO_LDFLAGS="-static -L/mingw64/lib \
-            -lfido2 -lykpers-1 -lyubikey -lcbor -lusb-1.0 -ljson-c -lssl -lcrypto -lz \
-            -lsetupapi -lhid -lcfgmgr32 -lwinusb -lole32 -lbcrypt -lcrypt32 -lws2_32 -ladvapi32"
-          make build STATIC=1 TAGS=fido2 BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
+            -lfido2 -lcbor -lssl -lcrypto -lz \
+            -lsetupapi -lhid -lcfgmgr32 -lole32 -lbcrypt -lcrypt32 -lws2_32 -ladvapi32"
+          make build STATIC=1 TAGS="fido2 pcsc" BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
 
       # Assert self-containment: ntldd must resolve ONLY Windows system DLLs.
       # Any mingw/msys runtime or third-party DLL means a dep leaked in.
@@ -244,7 +251,7 @@ jobs:
         run: |
           set -eo pipefail
           ntldd -R ${{ matrix.asset }} | tee ntldd.txt
-          if grep -iE 'mingw|msys|clang|libgcc|libwinpthread|libfido2|libcbor|libcrypto|libssl|libykpers|libyubikey|libusb|libjson|zlib1|libstdc' ntldd.txt; then
+          if grep -iE 'mingw|msys|clang|libgcc|libwinpthread|libfido2|libcbor|libcrypto|libssl|zlib1|libstdc' ntldd.txt; then
             echo "::error::icc.exe has non-system DLL dependencies — not self-contained"
             exit 1
           fi
@@ -297,7 +304,10 @@ jobs:
           prepare: |
             export IGNORE_OSVERSION=yes
             pkg update -f
-            pkg install -y go gmake pkgconf git ykpers libfido2
+            # libusb + iconv for go-hid's freebsd libusb backend are in the FreeBSD
+            # base system (-lusb = base libusb-1.0 API, libiconv in base), so no pkg
+            # needed for them. pcsc-lite provides libpcsclite for the scard backend.
+            pkg install -y go gmake pkgconf git libfido2 pcsc-lite
           run: |
             # Resolve a usable pkg-config (OpenBSD ships its own; pkgconf provides
             # it on FreeBSD) and point it at the BSD .pc dirs (lib + libdata). The
@@ -305,15 +315,15 @@ jobs:
             export PKG_CONFIG="$(command -v pkg-config || command -v pkgconf || echo pkg-config)"
             PCP="/usr/local/lib/pkgconfig:/usr/local/libdata/pkgconfig:/usr/local/share/pkgconfig"
             # Self-heal: prepend the actual dir of each .pc wherever the port put it.
-            for pc in ykpers-1 libfido2; do
+            for pc in libfido2 libpcsclite libusb-1.0; do
               d="$(find /usr/local /usr/pkg -name "$pc.pc" 2>/dev/null | head -1)"
               [ -n "$d" ] && PCP="$(dirname "$d"):$PCP"
             done
             export PKG_CONFIG_PATH="$PCP"
             echo "--- build env ---"; uname -a; go version; grep icfx go.mod; echo "PKG_CONFIG=$PKG_CONFIG"
-            echo "installed HW pkgs:"; (pkg_info 2>/dev/null || pkg info 2>/dev/null) | grep -iE 'ykpers|yubikey|fido' || echo "  (none matched!)"
-            "$PKG_CONFIG" --cflags --libs ykpers-1 || echo "ykpers-1 NOT FOUND"
+            echo "installed HW pkgs:"; (pkg_info 2>/dev/null || pkg info 2>/dev/null) | grep -iE 'fido|pcsc|ccid|usb' || echo "  (none matched!)"
             "$PKG_CONFIG" --cflags --libs libfido2 || echo "libfido2 NOT FOUND"
+            "$PKG_CONFIG" --cflags --libs libpcsclite || echo "libpcsclite NOT FOUND"
             # Trust the rsync'd workspace so git doesn't exit 128 (dubious ownership)
             # — also lets the Makefile stamp a real commit; skip Go's own VCS stamp
             # regardless (we stamp via ldflags); and let Go fetch the go.mod toolchain
@@ -324,10 +334,14 @@ jobs:
             # go-libfido2 ships NO freebsd/openbsd cgo directive, so -lfido2 is never
             # linked on BSD — inject it (via pkg-config, hardcoded fallback) alongside
             # the base /usr/local include+lib the compiler doesn't search by default.
-            export CGO_CFLAGS="-I/usr/local/include $("$PKG_CONFIG" --cflags libfido2 2>/dev/null)"
-            export CGO_LDFLAGS="-L/usr/local/lib $("$PKG_CONFIG" --libs libfido2 2>/dev/null || echo -lfido2)"
-            gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
-            || { echo "--- fido2 build failed; retrying without fido2 tag ---"; gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=; }
+            # Also inject libusb-1.0's cflags: on OpenBSD the go-hid fork's libusb
+            # backend includes <libusb.h>, which the libusb1 package installs under
+            # /usr/local/include/libusb-1.0 (pkg-config adds that -I). No-op on FreeBSD
+            # (base libusb header is already on the default search path).
+            export CGO_CFLAGS="-I/usr/local/include $("$PKG_CONFIG" --cflags libfido2 2>/dev/null) $("$PKG_CONFIG" --cflags libusb-1.0 2>/dev/null)"
+            export CGO_LDFLAGS="-L/usr/local/lib $("$PKG_CONFIG" --libs libfido2 2>/dev/null || echo -lfido2) $("$PKG_CONFIG" --libs libusb-1.0 2>/dev/null)"
+            gmake build TAGS="fido2 pcsc" BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
+            || { echo "--- HW build failed; retrying pure-Go (nohw) ---"; gmake build TAGS=nohw BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}; }
 
       - uses: actions/upload-artifact@v6
         with:
@@ -336,6 +350,11 @@ jobs:
           if-no-files-found: error
 
   # --- OpenBSD via QEMU VM: amd64 (on metal) + arm64 (emulated, slow) --------
+  # Built PER RELEASE: OpenBSD gives no cross-release binary compatibility (CGO links
+  # versioned shared libs; libc syscall pinning), so one binary per supported release
+  # × arch. We ship the latest two releases (OpenBSD's own support window); install.sh
+  # picks the match via `uname -r`. Bump `release:` here + OBSD_SUPPORTED in install.sh
+  # together each ~6-month cycle (once vmactions publishes the new image).
   build-openbsd:
     name: build ${{ matrix.asset }}
     runs-on: ubuntu-latest
@@ -344,23 +363,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { asset: icc-openbsd-amd64, arch: x86_64 }
-          - { asset: icc-openbsd-arm64, arch: aarch64 }
+          - { asset: icc-openbsd-7.9-amd64, arch: x86_64,  release: "7.9" }
+          - { asset: icc-openbsd-7.9-arm64, arch: aarch64, release: "7.9" }
+          - { asset: icc-openbsd-7.8-amd64, arch: x86_64,  release: "7.8" }
+          - { asset: icc-openbsd-7.8-arm64, arch: aarch64, release: "7.8" }
     steps:
       - uses: actions/checkout@v5
 
       - name: Build in OpenBSD VM
         uses: vmactions/openbsd-vm@v1
         with:
+          release: ${{ matrix.release }}
           arch: ${{ matrix.arch }}
           usesh: true
           # Forward the release tag into the guest (host env isn't inherited).
           envs: 'TAG'
           prepare: |
-            # NB: the OpenBSD *package* is `ykpers` (PKGNAME ykpers-1.20.0p3),
-            # not the port-dir name `yubikey-personalization` — the latter is not
-            # an installable stem and silently no-ops.
-            pkg_add -I go gmake pkgconf git ykpers libfido2
+            # go-hid's openbsd libusb backend (fork) needs libusb-1.0 → `libusb1`
+            # (header under /usr/local/include/libusb-1.0) AND iconv → `libiconv`
+            # (OpenBSD has no iconv in base, unlike FreeBSD; matches the comms/libhidapi
+            # port's LIB_DEPENDS). pcsc-lite provides libpcsclite for the scard backend.
+            # ykpers is gone (chalresp is go-hid).
+            #
+            # NB (runtime, not build): hidapi's libusb backend can only reach a device
+            # if uhid(4)/uhidev(4) are disabled in the kernel (config(8)) — same caveat
+            # as the comms/libhidapi port. The binary still BUILDS + ships regardless;
+            # HW challenge-response on a stock OpenBSD kernel is therefore best-effort.
+            pkg_add -I go gmake pkgconf git libfido2 libusb1 libiconv pcsc-lite
           run: |
             # Resolve a usable pkg-config (OpenBSD ships its own; pkgconf provides
             # it on FreeBSD) and point it at the BSD .pc dirs (lib + libdata). The
@@ -368,15 +397,15 @@ jobs:
             export PKG_CONFIG="$(command -v pkg-config || command -v pkgconf || echo pkg-config)"
             PCP="/usr/local/lib/pkgconfig:/usr/local/libdata/pkgconfig:/usr/local/share/pkgconfig"
             # Self-heal: prepend the actual dir of each .pc wherever the port put it.
-            for pc in ykpers-1 libfido2; do
+            for pc in libfido2 libpcsclite libusb-1.0; do
               d="$(find /usr/local /usr/pkg -name "$pc.pc" 2>/dev/null | head -1)"
               [ -n "$d" ] && PCP="$(dirname "$d"):$PCP"
             done
             export PKG_CONFIG_PATH="$PCP"
             echo "--- build env ---"; uname -a; go version; grep icfx go.mod; echo "PKG_CONFIG=$PKG_CONFIG"
-            echo "installed HW pkgs:"; (pkg_info 2>/dev/null || pkg info 2>/dev/null) | grep -iE 'ykpers|yubikey|fido' || echo "  (none matched!)"
-            "$PKG_CONFIG" --cflags --libs ykpers-1 || echo "ykpers-1 NOT FOUND"
+            echo "installed HW pkgs:"; (pkg_info 2>/dev/null || pkg info 2>/dev/null) | grep -iE 'fido|pcsc|ccid|usb' || echo "  (none matched!)"
             "$PKG_CONFIG" --cflags --libs libfido2 || echo "libfido2 NOT FOUND"
+            "$PKG_CONFIG" --cflags --libs libpcsclite || echo "libpcsclite NOT FOUND"
             # Trust the rsync'd workspace so git doesn't exit 128 (dubious ownership)
             # — also lets the Makefile stamp a real commit; skip Go's own VCS stamp
             # regardless (we stamp via ldflags); and let Go fetch the go.mod toolchain
@@ -387,10 +416,14 @@ jobs:
             # go-libfido2 ships NO freebsd/openbsd cgo directive, so -lfido2 is never
             # linked on BSD — inject it (via pkg-config, hardcoded fallback) alongside
             # the base /usr/local include+lib the compiler doesn't search by default.
-            export CGO_CFLAGS="-I/usr/local/include $("$PKG_CONFIG" --cflags libfido2 2>/dev/null)"
-            export CGO_LDFLAGS="-L/usr/local/lib $("$PKG_CONFIG" --libs libfido2 2>/dev/null || echo -lfido2)"
-            gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
-            || { echo "--- fido2 build failed; retrying without fido2 tag ---"; gmake build BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} TAGS=; }
+            # Also inject libusb-1.0's cflags: on OpenBSD the go-hid fork's libusb
+            # backend includes <libusb.h>, which the libusb1 package installs under
+            # /usr/local/include/libusb-1.0 (pkg-config adds that -I). No-op on FreeBSD
+            # (base libusb header is already on the default search path).
+            export CGO_CFLAGS="-I/usr/local/include $("$PKG_CONFIG" --cflags libfido2 2>/dev/null) $("$PKG_CONFIG" --cflags libusb-1.0 2>/dev/null)"
+            export CGO_LDFLAGS="-L/usr/local/lib $("$PKG_CONFIG" --libs libfido2 2>/dev/null || echo -lfido2) $("$PKG_CONFIG" --libs libusb-1.0 2>/dev/null)"
+            gmake build TAGS="fido2 pcsc" BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
+            || { echo "--- HW build failed; retrying pure-Go (nohw) ---"; gmake build TAGS=nohw BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}; }
 
       - uses: actions/upload-artifact@v6
         with:
