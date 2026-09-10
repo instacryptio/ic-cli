@@ -66,8 +66,6 @@ github.com/instacryptio/go-hid v0.15.0-instacrypt.4 h1:gGW5esuNMzivvP72yR0MwLEtp
 github.com/instacryptio/go-hid v0.15.0-instacrypt.4/go.mod h1:fPKp4rqx0xuoTV94gwKojsPG++KNKhxuU88goGuGM7I=
 github.com/instacryptio/go-libfido2 v1.5.4-instacrypt.2 h1:Pjui/zkMSSlTByWQFJIwW2PrAmrQ0ngBMTTH8uyjFF4=
 github.com/instacryptio/go-libfido2 v1.5.4-instacrypt.2/go.mod h1:92J9LtSBl0UyUWljElJpTbMMNhC6VeY8dshsu40qjjo=
-github.com/instacryptio/icfx v0.1.5 h1:/1JZVNUpe8u6cQfJpmaKUoMbPlfvThEuE93AGNztrXM=
-github.com/instacryptio/icfx v0.1.5/go.mod h1:OwP9Wz7Tglz1rfVMhL0YTtLJeGAFK5eNVQQGWtu25UM=
 github.com/keybase/go-keychain v0.0.1 h1:way+bWYa6lDppZoZcgMbYsvC7GxljxrskdNInRtuthU=
 github.com/keybase/go-keychain v0.0.1/go.mod h1:PdEILRW3i9D8JcdM+FmY6RwkHGnhHxXwkPPMeUgOK1k=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=

@@ -67,3 +67,8 @@ replace github.com/keys-pub/go-libfido2 => github.com/instacryptio/go-libfido2 v
 // interface (USB control transfers never touch IOHIDManager). Both reuse the portable
 // hid_libusb.c backend. Linux stays hidraw, Windows stays hid.dll.
 replace github.com/sstallion/go-hid => github.com/instacryptio/go-hid v0.15.0-instacrypt.4
+
+// TEMPORARY (macOS libusb HID fixes): build against local icfx while iterating on the
+// hidList usage-filter + pcscList skip-YubiKey fixes. Revert + cut an icfx tag once the
+// no-sudo macOS test passes. Requires the icfx checkout at ../icfx (sibling dir).
+replace github.com/instacryptio/icfx => ../icfx
