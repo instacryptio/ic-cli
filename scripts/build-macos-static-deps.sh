@@ -4,11 +4,12 @@
 # Homebrew installed.
 #
 # A *fully* static macOS binary is impossible — Apple ships no static libSystem —
-# so the target is "third-party static, system dynamic": libfido2 + its deps
-# (openssl, libcbor) become .a archives here, while the always-present macOS system
-# pieces (libSystem, CoreFoundation, IOKit, Security, PCSC, libz) stay dynamic.
-# (chalresp's go-hid and the pcsc backend's scard link only those system pieces —
-# no third-party lib to build.) Every
+# so the target is "third-party static, system dynamic": libfido2 (+ openssl, libcbor)
+# and libusb become .a archives here, while the always-present macOS system pieces
+# (libSystem, CoreFoundation, IOKit, Security, PCSC, libz) stay dynamic. chalresp's
+# go-hid uses the libusb backend on macOS (our fork — avoids IOHIDManager's Input
+# Monitoring gate), so libusb is built static too; the pcsc backend's scard links
+# only the system PCSC framework. Every
 # lib installs with --disable-shared / BUILD_SHARED_LIBS=OFF so ONLY .a archives
 # land in $PREFIX (no .dylib for the runtime to resolve); the release build then
 # points cgo's pkg-config at $PREFIX, and because nothing but .a is present the
@@ -24,10 +25,13 @@ PREFIX="${PREFIX:?set PREFIX to the install dir}"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 # Pinned dependency versions. If a first CI run 404s or a tag drifts, adjust here.
-# Sources: openssl/libcbor via GitHub releases; libfido2 via developers.yubico.com.
+# Sources: openssl/libcbor/libusb via GitHub releases; libfido2 via developers.yubico.com.
 OPENSSL_VER="${OPENSSL_VER:-3.4.0}"
 LIBCBOR_VER="${LIBCBOR_VER:-0.11.0}"
 LIBFIDO2_VER="${LIBFIDO2_VER:-1.15.0}"
+# libusb: on macOS the go-hid fork uses its libusb backend (not IOHIDManager), so chalresp
+# links libusb. Built static here so `icc` stays self-contained (pkg-config finds it in $PREFIX).
+LIBUSB_VER="${LIBUSB_VER:-1.0.30}"
 
 MARKER="$PREFIX/.icc-static-deps-ok"
 if [ -f "$MARKER" ]; then
@@ -88,6 +92,15 @@ fetch "https://developers.yubico.com/libfido2/Releases/libfido2-${LIBFIDO2_VER}.
 tar xf libfido2.tgz
 cmake_static "libfido2-${LIBFIDO2_VER}" \
   -DBUILD_EXAMPLES=OFF -DBUILD_MANPAGES=OFF -DBUILD_TOOLS=OFF
+
+# 4. libusb (autotools) — the go-hid fork's macOS backend links it. Installs
+# libusb-1.0.pc into $PREFIX so cgo's `#cgo darwin pkg-config: libusb-1.0` resolves
+# the static .a here. Its darwin backend uses IOKit/CoreFoundation (linked by go-hid's
+# #cgo darwin LDFLAGS) — if the static link later reports missing ObjC symbols, add
+# -lobjc to the macOS CGO_LDFLAGS in release.yml.
+fetch "https://github.com/libusb/libusb/releases/download/v${LIBUSB_VER}/libusb-${LIBUSB_VER}.tar.bz2" libusb.tbz2
+tar xf libusb.tbz2
+autotools_static "libusb-${LIBUSB_VER}"
 
 touch "$MARKER"
 echo "== static dep prefix ready: $PREFIX =="

@@ -61,7 +61,9 @@ require (
 
 replace github.com/keys-pub/go-libfido2 => github.com/instacryptio/go-libfido2 v1.5.4-instacrypt.2
 
-// OpenBSD support for go-hid (upstream v0.15.0 has no openbsd cgo directive / build
-// constraint). Fork adds `#cgo openbsd` flags + the openbsd token to the libusb backend's
-// build tags, reusing the portable hid_libusb.c backend. See instacryptio/go-hid @ instacrypt.
-replace github.com/sstallion/go-hid => github.com/instacryptio/go-hid v0.15.0-instacrypt.1
+// go-hid fork (instacryptio/go-hid @ instacrypt): (1) OpenBSD support — upstream has no
+// openbsd cgo/build-tag; (2) macOS uses the libusb backend unconditionally instead of
+// IOHIDManager, to avoid the Input Monitoring/TCC gate on the YubiKey's keyboard-class OTP
+// interface (USB control transfers never touch IOHIDManager). Both reuse the portable
+// hid_libusb.c backend. Linux stays hidraw, Windows stays hid.dll.
+replace github.com/sstallion/go-hid => github.com/instacryptio/go-hid v0.15.0-instacrypt.2
