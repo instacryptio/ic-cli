@@ -56,8 +56,11 @@ func runHardwareProbe(cmd *cobra.Command, args []string) error {
 		fmt.Println(utils.RenderDim("  (none)"))
 		fmt.Println()
 		fmt.Println(utils.RenderDim("If a device is plugged in but not listed:"))
-		fmt.Println(utils.RenderDim("  - Linux: install udev rules (yubikey-personalization or libfido2 package)"))
-		fmt.Println(utils.RenderDim("  - All: confirm with `ykman list` or similar (libykpers backs both icc and ykman)"))
+		fmt.Println(utils.RenderDim("  - Linux (YubiKey/OnlyKey): a udev rule must grant your user access to the"))
+		fmt.Println(utils.RenderDim("    key's /dev/hidraw* node (install the yubikey-manager or libfido2 package)"))
+		fmt.Println(utils.RenderDim("  - Linux (Nitrokey 3, PC/SC): ensure pcscd is running and libpcsclite is installed"))
+		fmt.Println(utils.RenderDim("  - All: confirm the device enumerates with `ykman list` or similar to isolate"))
+		fmt.Println(utils.RenderDim("    a hardware/cabling issue"))
 		return nil
 	}
 

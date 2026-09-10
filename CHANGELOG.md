@@ -10,6 +10,7 @@
 - Added Gatekeeper detect+prompt in install.sh
 - Changed to build FreeBSD builds with FreeBSD 14.3
 - Added proper openBSD builds (7.8 and 7.9)
+- Added instacryptio/go-hid
 
 
 **v0.1.1 - 09-07-2026**
