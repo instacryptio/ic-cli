@@ -2,7 +2,7 @@
 
 **v0.1.2 - 09-09-2026**
 
-- Bumped icfx to v0.1.4
+- Bumped icfx to v0.1.5
 - Added static knob to build
 - Added Windows static build in GA
 - Added macOS static build in GA
