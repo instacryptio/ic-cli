@@ -74,7 +74,7 @@ jobs:
       # minutes (openssl dominates); warm cache is instant via the script's marker.
       - name: Cache static deps (macOS)
         if: matrix.os == 'macos'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/deps
           key: macos-static-deps-${{ matrix.asset }}-${{ hashFiles('scripts/build-macos-static-deps.sh') }}
