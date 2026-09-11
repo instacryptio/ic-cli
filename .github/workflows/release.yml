@@ -92,16 +92,15 @@ jobs:
           make build TAGS="fido2 pcsc" BUILD_BIN=${{ matrix.asset }} VERSION=${TAG} \
           || make build TAGS=nohw BUILD_BIN=${{ matrix.asset }} VERSION=${TAG}
 
-      # macOS static build: point cgo's pkg-config at the static-only prefix so the
-      # forked go-hid's `#cgo darwin pkg-config: libusb-1.0` and go-libfido2's
-      # `#cgo darwin pkg-config: libfido2` resolve to the .a archives there. go-hid uses
-      # the LIBUSB backend on macOS (our fork — USB control transfers, no IOHIDManager,
-      # so no Input Monitoring/TCC gate). Append libfido2's provider chain (cbor/crypto/z)
-      # + the system frameworks the static libfido2 AND libusb darwin backends need
-      # (IOKit/CoreFoundation), Security, and PCSC (scard). No `-static` (fails on macOS):
-      # the .a-only prefix already forces static third-party libs. No `|| TAGS=` fallback —
-      # a reduced fallback would still be dynamic and still not run on a Homebrew-free Mac.
-      # (If the static libusb link reports missing ObjC symbols, add -lobjc below.)
+      # macOS static build: point cgo's pkg-config at the static-only prefix so
+      # go-libfido2's `#cgo darwin pkg-config: libfido2` resolves to the .a archives
+      # there. go-hid uses the native IOHIDManager backend on macOS (IOKit/CoreFoundation
+      # frameworks — no third-party lib); chalresp's macOS open-mode + thread fixes live
+      # in icfx (SetOpenExclusive(false) + LockOSThread). Append libfido2's provider chain
+      # (cbor/crypto/z) + the system frameworks go-hid/libfido2 (IOKit/CoreFoundation) +
+      # Security + PCSC (scard) need. No `-static` (fails on macOS): the .a-only prefix
+      # already forces static third-party libs. No `|| TAGS=` fallback — a reduced fallback
+      # would still be dynamic and still not run on a Homebrew-free Mac.
       - name: Build (macOS, static third-party libs)
         if: matrix.os == 'macos'
         env:

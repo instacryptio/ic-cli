@@ -2,7 +2,7 @@
 
 **v0.1.2 - 09-10-2026**
 
-- Bumped icfx to v0.1.5
+- Bumped icfx to v0.1.6
 - Added static knob to build
 - Added Windows static build in GA
 - Added macOS static build in GA
@@ -10,7 +10,7 @@
 - Added Gatekeeper detect+prompt in install.sh
 - Changed to build FreeBSD builds with FreeBSD 14.3
 - Added proper openBSD builds (7.8 and 7.9)
-- Added instacryptio/go-hid
+- Added instacryptio/go-hid .1
 
 
 **v0.1.1 - 09-07-2026**

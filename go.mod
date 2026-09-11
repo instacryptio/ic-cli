@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/instacryptio/icfx v0.1.5
+	github.com/instacryptio/icfx v0.1.6
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.42.0
 )
@@ -61,14 +61,10 @@ require (
 
 replace github.com/keys-pub/go-libfido2 => github.com/instacryptio/go-libfido2 v1.5.4-instacrypt.2
 
-// go-hid fork (instacryptio/go-hid @ instacrypt): (1) OpenBSD support — upstream has no
-// openbsd cgo/build-tag; (2) macOS uses the libusb backend unconditionally instead of
-// IOHIDManager, to avoid the Input Monitoring/TCC gate on the YubiKey's keyboard-class OTP
-// interface (USB control transfers never touch IOHIDManager). Both reuse the portable
-// hid_libusb.c backend. Linux stays hidraw, Windows stays hid.dll.
-replace github.com/sstallion/go-hid => github.com/instacryptio/go-hid v0.15.0-instacrypt.4
-
-// TEMPORARY (macOS libusb HID fixes): build against local icfx while iterating on the
-// hidList usage-filter + pcscList skip-YubiKey fixes. Revert + cut an icfx tag once the
-// no-sudo macOS test passes. Requires the icfx checkout at ../icfx (sibling dir).
-replace github.com/instacryptio/icfx => ../icfx
+// go-hid fork (instacryptio/go-hid @ instacrypt): adds OpenBSD support to the libusb
+// backend (upstream has no openbsd cgo/build-tag). Tag .1 ONLY — it leaves hid_darwin.*
+// untouched, so macOS stays on upstream IOHIDManager, which is what the chalresp macOS
+// fixes in icfx rely on (SetOpenExclusive(false) + LockOSThread). The later .2/.3/.4 tags
+// forced darwin→libusb and are ABANDONED (libusb can't open a kernel-held HID interface on
+// macOS). Linux stays hidraw, Windows stays hid.dll.
+replace github.com/sstallion/go-hid => github.com/instacryptio/go-hid v0.15.0-instacrypt.1
