@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/instacryptio/icfx v0.1.2
+	github.com/instacryptio/icfx v0.1.6
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.42.0
 )
@@ -29,6 +29,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
+	github.com/ebfe/scard v0.0.0-20241214075232-7af069cabc25 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
@@ -48,6 +49,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/sstallion/go-hid v0.15.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zalando/go-keyring v0.2.6 // indirect
@@ -56,3 +58,13 @@ require (
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 )
+
+replace github.com/keys-pub/go-libfido2 => github.com/instacryptio/go-libfido2 v1.5.4-instacrypt.2
+
+// go-hid fork (instacryptio/go-hid @ instacrypt): adds OpenBSD support to the libusb
+// backend (upstream has no openbsd cgo/build-tag). Tag .1 ONLY — it leaves hid_darwin.*
+// untouched, so macOS stays on upstream IOHIDManager, which is what the chalresp macOS
+// fixes in icfx rely on (SetOpenExclusive(false) + LockOSThread). The later .2/.3/.4 tags
+// forced darwin→libusb and are ABANDONED (libusb can't open a kernel-held HID interface on
+// macOS). Linux stays hidraw, Windows stays hid.dll.
+replace github.com/sstallion/go-hid => github.com/instacryptio/go-hid v0.15.0-instacrypt.1

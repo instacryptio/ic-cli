@@ -32,8 +32,8 @@ A terminal-based post-quantum ready, file encryption assistant by [Instacrypt](h
 
 - Linux
 - macOS
-- FreeBSD
-- OpenBSD
+- FreeBSD (14.4+)
+- OpenBSD (7.8 & 7.9)
 - Windows
 
 

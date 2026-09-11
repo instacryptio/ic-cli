@@ -87,7 +87,28 @@ case "$UNAME_M" in
     ;;
 esac
 
-ASSET="${BINARY}-${OS}-${ARCH}"
+# OpenBSD has no cross-release binary ABI (CGO links versioned libs; libc syscall
+# pinning), so icc is built per release — pick the build matching this host, and bail
+# clearly (before any download) on a release we don't publish a binary for.
+REL=""
+if [ "$OS" = "openbsd" ]; then
+  OBSD_REL="$(uname -r)"                 # e.g. 7.9
+  # Keep in sync with the build-openbsd matrix in .github/workflows/release.yml.
+  OBSD_SUPPORTED="7.8 7.9"
+  case " ${OBSD_SUPPORTED} " in
+    *" ${OBSD_REL} "*) REL="-${OBSD_REL}" ;;
+    *)
+      err "OpenBSD ${OBSD_REL} is not supported (prebuilt binaries exist for: ${OBSD_SUPPORTED}).
+OpenBSD gives no cross-release binary compatibility, so icc ships one build per release.
+Upgrade to a supported release, or build from source:
+  pkg_add gmake pkgconf git libfido2 libusb1 libiconv pcsc-lite
+  git clone https://github.com/${REPO} && cd ic-cli && gmake build
+(See the release workflow's build-openbsd job for the exact CGO_CFLAGS/LDFLAGS.)"
+      exit 1
+      ;;
+  esac
+fi
+ASSET="${BINARY}-${OS}${REL}-${ARCH}"
 say "   Platform: ${BOLD}${OS}/${ARCH}${RESET}"
 say ""
 
@@ -181,6 +202,36 @@ DEST="${TARGET_DIR}/${BINARY}"
 $USE_SUDO mv "$TMP" "$DEST"
 trap - EXIT
 say ""
+
+# --- 5b. macOS Gatekeeper quarantine (detect, then ASK — never silent) -----
+# A binary fetched with curl/wget is normally NOT quarantined, so this is usually
+# a no-op. But a browser/AirDrop download would be, and clearing the quarantine
+# flag is a Gatekeeper bypass — so we only act when the flag is actually present,
+# and only with the user's explicit consent (default: leave it in place). Under a
+# non-interactive `curl | bash` run, ask() returns the default and we just print
+# the manual command instead of stripping anything.
+if [ "$OS" = "macos" ] && command -v xattr >/dev/null 2>&1 \
+   && xattr -p com.apple.quarantine "$DEST" >/dev/null 2>&1; then
+  say "${BOLD}macOS Gatekeeper${RESET} has quarantined ${DEST}."
+  say "Clearing the quarantine flag lets ${BOLD}icc${RESET} run without a Gatekeeper block."
+  GK="$(ask "Clear the quarantine flag now? [y/N]: " "n")"
+  case "$GK" in
+    y|Y|yes|YES)
+      if $USE_SUDO xattr -dr com.apple.quarantine "$DEST" 2>/dev/null; then
+        say "   Quarantine flag cleared."
+      else
+        err "   Could not clear it automatically. Run this yourself:"
+        say "     ${BOLD}xattr -dr com.apple.quarantine \"${DEST}\"${RESET}"
+      fi
+      ;;
+    *)
+      say "   Left the quarantine flag in place. If macOS blocks icc, either run:"
+      say "     ${BOLD}xattr -dr com.apple.quarantine \"${DEST}\"${RESET}"
+      say "   or right-click icc in Finder and choose Open the first time."
+      ;;
+  esac
+  say ""
+fi
 
 # --- 6. done ---------------------------------------------------------------
 printf '%s\n' "${BRAND}${BOLD}** Installation Completed **${RESET}"
