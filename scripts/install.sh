@@ -42,7 +42,7 @@ banner() {
 ░▒▓█▓▒░░▒▓██████▓▒░        ░▒▓██████▓▒░░▒▓████████▓▒░▒▓█▓▒░
 ART
   printf '%s' "${RESET}"
-  printf '%s\n\n' "  ${BOLD}Installer${RESET}${DIM} — post-quantum ready, password-less file encryption${RESET}"
+  printf '%s\n\n' "  ${BOLD}Installer${RESET}${DIM} — post-quantum ready file encryption${RESET}"
 }
 
 # --- prompt helper (reads the terminal even under `curl | bash`) ------------
