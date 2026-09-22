@@ -235,6 +235,10 @@ var cloudShareGetCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
+		policy, err := verifyPolicyFrom(cmd)
+		if err != nil {
+			return err
+		}
 		c, err := requireCloudAuth(ctx)
 		if err != nil {
 			return err
@@ -317,7 +321,9 @@ var cloudShareGetCmd = &cobra.Command{
 			var res decrypt.VerifyResult
 			res, decErr = decrypt.DecryptAndVerifyStream(enc, outTmp, unlocked, contactList)
 			if decErr == nil {
-				renderVerify(res, os.Stdout)
+				// The verdict arrives after the plaintext is in the temp file;
+				// the policy decides whether it is promoted to dest below.
+				decErr = gateVerify(res, os.Stdout, policy)
 			}
 		default:
 			var r io.Reader
@@ -519,6 +525,7 @@ func init() {
 	cloudShareSendCmd.Flags().BoolVar(&shareSendNoMail, "no-mail", false, "skip the recipient notification e-mail (they still see it in their app / inbox)")
 
 	cloudShareGetCmd.Flags().StringVarP(&shareGetOut, "out", "o", ".", "output directory")
+	addVerifyPolicyFlags(cloudShareGetCmd)
 	cloudShareDownloadCmd.Flags().StringVarP(&shareDownloadOut, "out", "o", ".", "output directory")
 
 	cloudShareCmd.AddCommand(

@@ -10,3 +10,7 @@
 # Text Editor Swap
 .swo
 .swp
+
+# Local Dev
+/go.local.mod
+/go.local.sum

@@ -4,15 +4,19 @@ import (
 	"fmt"
 	"os"
 
+	"golang.org/x/term"
+
 	"github.com/instacryptio/ic-cli/internal/cli"
 	"github.com/instacryptio/ic-cli/internal/utils"
 	"github.com/instacryptio/icfx/config"
 )
 
 func main() {
-	// Skip banner during shell completion or when disabled via config
+	// Skip the banner during shell completion, when disabled via config, or
+	// when stdout is not a terminal — piped output (armored ciphertext,
+	// decrypted plaintext) must be exactly the data.
 	cfg, _ := config.Load()
-	if !isCompletionRequest() && cfg.Banner {
+	if !isCompletionRequest() && cfg.Banner && term.IsTerminal(int(os.Stdout.Fd())) {
 		banner := `
 ░▒▓█▓▒░░▒▓██████▓▒░        ░▒▓██████▓▒░░▒▓█▓▒░      ░▒▓█▓▒░
 ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░

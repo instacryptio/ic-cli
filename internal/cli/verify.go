@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -19,7 +21,18 @@ var verifyCmd = &cobra.Command{
 	Use:     "verify <file>",
 	Aliases: []string{"v"},
 	Short:   "Verify a file's signature",
-	Args:    cobra.ExactArgs(1),
+	Long: `Verify a file's signature.
+
+An .icfx container (binary or armored) is verified by decrypting it in memory
+with your identity — the signature covers the plaintext and the signer is
+named inside the encryption, so only a recipient can check it. Nothing is
+written. Exits non-zero unless the signature verifies against a contact or
+one of your own identities.
+
+Any other file is checked against a detached signature (<file>.sig, or
+--signature) made with 'icc sign', matched against your contacts or the lock
+given with --signer.`,
+	Args: cobra.ExactArgs(1),
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveDefault
 	},
@@ -28,61 +41,51 @@ var verifyCmd = &cobra.Command{
 		signerFlag, _ := cmd.Flags().GetString("signer")
 		sigFile, _ := cmd.Flags().GetString("signature")
 
-		data, err := os.ReadFile(inputPath)
-		if err != nil {
-			return fmt.Errorf("reading input file: %w", err)
+		if sigFile == "" {
+			head, err := readFileHead(inputPath, 64)
+			if err != nil {
+				return fmt.Errorf("reading input file: %w", err)
+			}
+			switch format.Detect(head) {
+			case format.FormatICFX, format.FormatArmored:
+				if isExplicitKey(signerFlag) {
+					return fmt.Errorf("--signer with a lock verifies detached signatures only; an .icfx container is verified by decrypting it with your identity")
+				}
+				return verifyContainer(inputPath)
+			}
 		}
 
 		contactStore, err := newContactStore()
 		if err != nil {
 			return err
 		}
-
-		// If it's an ICFX container, extract signature and payload
-		detected := format.Detect(data)
-		if detected == format.FormatICFX && sigFile == "" {
-			container, err := format.Deserialize(data)
-			if err != nil {
-				return fmt.Errorf("parsing ICFX container: %w", err)
-			}
-			// Explicit --signer key: verify against exactly that, no unlock
-			// (the automation path). Only possible for headered containers.
-			if !container.Private && (strings.Contains(signerFlag, "/") || len(signerFlag) > 100) {
-				if !container.Metadata.IsSigned || len(container.Signature) == 0 {
-					fmt.Println(utils.RenderDim("File is not signed."))
-					return nil
-				}
-				return verifySignature(container.Payload, container.Signature, container.Metadata.SenderFingerprint,
-					signerFlag, contactStore)
-			}
-			// Normal path: verify is an unlocked operation — the signer is
-			// matched against contacts AND the caller's own identity (the
-			// -i flag or the default), exactly like decrypt does.
-			return verifyContainer(container, data)
+		data, err := os.ReadFile(inputPath)
+		if err != nil {
+			return fmt.Errorf("reading input file: %w", err)
 		}
-
-		// Detached signature mode
-		var signature []byte
 		if sigFile == "" {
 			sigFile = inputPath + ".sig"
 		}
-		signature, err = os.ReadFile(sigFile)
+		signature, err := os.ReadFile(sigFile)
 		if err != nil {
 			return fmt.Errorf("reading signature file: %w", err)
 		}
-
-		return verifySignature(data, signature, "", signerFlag, contactStore)
+		return verifyDetached(data, signature, signerFlag, contactStore)
 	},
 }
 
-// verifySignature checks a signature against contacts only (since matching
-// against the user's own identities by fingerprint would require unlocking
-// each — too expensive here). Self-signed verification falls back to "no
-// matching signer" with the fingerprint shown so the user can recognize
-// their own.
-func verifySignature(data, signature []byte, senderFP, signerFlag string, contactStore *contacts.Store) error {
-	// If signer is specified directly as a base64 key
-	if strings.Contains(signerFlag, "/") || len(signerFlag) > 100 {
+// isExplicitKey reports whether the --signer value is a base64 lock rather
+// than a contact alias or fingerprint.
+func isExplicitKey(signerFlag string) bool {
+	return strings.Contains(signerFlag, "/") || len(signerFlag) > 100
+}
+
+// verifyDetached checks a detached signature against the lock given with
+// --signer, or against contacts (optionally narrowed to one alias /
+// fingerprint). The user's own identities are not candidates here — matching
+// them would mean unlocking each one.
+func verifyDetached(data, signature []byte, signerFlag string, contactStore *contacts.Store) error {
+	if isExplicitKey(signerFlag) {
 		pubKey, err := base64.StdEncoding.DecodeString(signerFlag)
 		if err != nil {
 			return fmt.Errorf("decoding signer lock (public key): %w", err)
@@ -106,12 +109,8 @@ func verifySignature(data, signature []byte, senderFP, signerFlag string, contac
 		pubKey []byte
 	}
 	var candidates []candidate
-
 	for _, c := range contactList {
 		if signerFlag != "" && c.Alias != signerFlag && c.Fingerprint != signerFlag {
-			continue
-		}
-		if senderFP != "" && c.Fingerprint != senderFP {
 			continue
 		}
 		pubKey, err := base64.StdEncoding.DecodeString(c.SignPubKey)
@@ -134,23 +133,17 @@ func verifySignature(data, signature []byte, senderFP, signerFlag string, contac
 
 	fmt.Println(utils.RenderError("Signature verification FAILED"))
 	if len(candidates) == 0 {
-		hint := "No matching signer found in contacts."
-		if senderFP != "" {
-			hint += " (sender fingerprint: " + senderFP + " — if this is one of your own identities, run `icc id list` to recognize it)"
-		}
-		fmt.Println(utils.RenderDim(hint))
+		fmt.Println(utils.RenderDim("No matching signer found in contacts."))
 	}
 	return fmt.Errorf("signature could not be verified")
 }
 
-// verifyContainer verifies an ICFX container as an unlocked operation: the
-// caller's identity (global -i, else the default) joins the contacts as a
-// signer candidate — encrypt-to-self files verify just like contact-signed
-// ones. Headered containers verify without decrypting; private containers
-// are decrypted IN MEMORY first (the sender's identity lives inside the
-// encryption — only the recipient can verify those) and the plaintext is
-// discarded. Exits non-zero when the signature does not verify.
-func verifyContainer(container *format.Container, data []byte) error {
+// verifyContainer verifies an .icfx container as an unlocked operation: the
+// container is decrypted in memory (the plaintext is discarded) and its
+// signature checked against contacts and the caller's own identity (the -i
+// flag or the default) — encrypt-to-self files verify just like contact-signed
+// ones. Exits non-zero when the signature does not verify.
+func verifyContainer(inputPath string) error {
 	idStore, err := newIdentityStore()
 	if err != nil {
 		return err
@@ -175,39 +168,79 @@ func verifyContainer(container *format.Container, data []byte) error {
 	}
 	defer unlocked.Close()
 
-	if container.Private {
-		fmt.Println(utils.RenderDim("Private container — decrypting in memory to verify (nothing is written)."))
-	}
-
 	var contactList []contacts.Contact
 	if store, cerr := newContactStore(); cerr == nil {
 		contactList, _ = store.Load()
 	}
-	res, err := decrypt.DecryptAndVerify(data, unlocked, contactList)
+
+	src, err := openContainer(inputPath)
 	if err != nil {
-		if container.Private {
-			return fmt.Errorf("private container — this identity cannot decrypt it (only the recipient can verify): %w", err)
-		}
 		return err
 	}
+	defer src.Close()
 
-	switch res.Verify.Status {
+	fmt.Println(utils.RenderDim("Decrypting in memory to verify (nothing is written)."))
+	res, err := decrypt.DecryptAndVerifyStream(src, io.Discard, unlocked, contactList)
+	if err != nil {
+		return fmt.Errorf("this identity cannot decrypt the container (only a recipient can verify it): %w", err)
+	}
+
+	switch res.Status {
 	case decrypt.VerifyUnsigned:
 		fmt.Println(utils.RenderDim("File is not signed."))
 		return nil
-	case decrypt.VerifyNoMetadata:
-		return fmt.Errorf("private pre-v2 container carries no sender metadata — the signature cannot be verified")
 	case decrypt.VerifyOK:
-		renderVerify(res.Verify, os.Stdout)
+		renderVerify(res, os.Stdout)
 		return nil
-	default: // VerifyUnverifiable
-		renderVerify(res.Verify, os.Stdout)
-		return fmt.Errorf("signature could not be verified")
+	case decrypt.VerifyFailed:
+		renderVerify(res, os.Stdout)
+		return fmt.Errorf("signature verification failed")
+	case decrypt.VerifyUnknownSigner:
+		renderVerify(res, os.Stdout)
+		return fmt.Errorf("signature could not be verified: unknown sender")
+	default:
+		renderVerify(res, os.Stdout)
+		return fmt.Errorf("signature could not be verified (%s)", res.Status)
 	}
 }
 
+// openContainer returns the .icfx bytes at path as a seekable stream: the file
+// itself for a binary container (constant memory), or the decoded bytes for an
+// armored one (which has to be buffered).
+func openContainer(path string) (io.ReadSeekCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading input file: %w", err)
+	}
+	head, err := readFileHead(path, 64)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("reading input file: %w", err)
+	}
+	if format.Detect(head) != format.FormatArmored {
+		return f, nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading input file: %w", err)
+	}
+	payload, label, err := format.ArmorDecode(data)
+	if err != nil {
+		return nil, fmt.Errorf("decoding armored input: %w", err)
+	}
+	if label != format.ArmorICFXLabel {
+		return nil, fmt.Errorf("unsupported armor label: %s", label)
+	}
+	return readSeekNopCloser{bytes.NewReader(payload)}, nil
+}
+
+type readSeekNopCloser struct{ *bytes.Reader }
+
+func (readSeekNopCloser) Close() error { return nil }
+
 func init() {
-	verifyCmd.Flags().String("signer", "", "Signer alias, fingerprint, or base64 lock (public key)")
+	verifyCmd.Flags().String("signer", "", "Detached signatures: signer alias, fingerprint, or base64 lock (public key)")
 	verifyCmd.Flags().String("signature", "", "Path to detached signature file")
 	rootCmd.AddCommand(verifyCmd)
 }
