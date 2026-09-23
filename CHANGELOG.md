@@ -9,6 +9,7 @@
 - Sender fingerprints are sanitized before reaching the terminal
 - When stdout is not a terminal it carries exactly the command's data: the banner, trailing spacing and the decrypt `---` marker no longer corrupt piped armored/plaintext output
 - `icc verify` exit status: 0 verified, 1 failed, 2 unsigned, 3 unknown sender
+- Fixed `--conf-path`
 
 
 **v0.1.2 - 09-10-2026**

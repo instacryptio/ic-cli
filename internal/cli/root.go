@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -36,6 +37,15 @@ var rootCmd = &cobra.Command{
 		}
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// --conf-path redirects the whole config directory (config.toml and
+		// the cloud state kept beside it), so every Load AND every Save in
+		// this process goes there — a scratch or test run can never rewrite
+		// the real config (which is exactly what happened before this was
+		// honoured: `identity create` saved its default-identity change to
+		// the user's config while the flag was silently ignored).
+		if flagConfPath != "" {
+			config.SetConfigDir(confDirFromFlag(flagConfPath))
+		}
 		cfg, err := config.Load()
 		if err != nil {
 			return nil
@@ -53,6 +63,16 @@ var rootCmd = &cobra.Command{
 		fmt.Fprintln(os.Stderr, utils.RenderDim("Keychain unavailable — keystore auto-corrected to file."))
 		return nil
 	},
+}
+
+// confDirFromFlag maps --conf-path to the directory icfx keeps its config in:
+// the parent when the value names a config.toml, otherwise the value itself is
+// the directory (created on first save).
+func confDirFromFlag(p string) string {
+	if filepath.Base(p) == "config.toml" {
+		return filepath.Dir(p)
+	}
+	return p
 }
 
 func nameWithAliases(cmd *cobra.Command) string {
@@ -113,7 +133,7 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 	rootCmd.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "V", false, "Enable verbose output")
 	rootCmd.PersistentFlags().StringVar(&flagKeystore, "keystore", "", "Keystore type: keychain or file (default: from config)")
 	rootCmd.PersistentFlags().StringVarP(&flagIdentity, "identity", "i", "", "Identity name to use (default: primary)")
-	rootCmd.PersistentFlags().StringVar(&flagConfPath, "conf-path", "", "Config file path (overrides default location)")
+	rootCmd.PersistentFlags().StringVar(&flagConfPath, "conf-path", "", "Config directory (or its config.toml) to use instead of the default; cloud state is kept there too")
 	rootCmd.PersistentFlags().StringVar(&flagDataPath, "data-path", "", "Data directory path (contacts, identities)")
 	rootCmd.PersistentFlags().StringVar(&flagKeyPath, "key-path", "", "Key directory path (private keys)")
 	rootCmd.PersistentFlags().BoolVar(&flagFullKeys, "full", false, "Show full locks (public keys) instead of the truncated default")
