@@ -1,5 +1,17 @@
 # CHANGELOG
 
+**v0.1.3 - 09-23-2026**
+
+- Bumped icfx to v0.1.7 (hardening) 
+- `icc decrypt` / `icc cloud share get`: a failed signature asks before writing (refuses in scripts); new `--allow-unverified` and `--require-verified`
+- Output is decrypted to a temp file and promoted only once released, so unverified plaintext never lands at the destination
+- `icc verify` works on the containers the clients actually write (was rejecting every streaming container) and on armored input
+- Sender fingerprints are sanitized before reaching the terminal
+- When stdout is not a terminal it carries exactly the command's data: the banner, trailing spacing and the decrypt `---` marker no longer corrupt piped armored/plaintext output
+- `icc verify` exit status: 0 verified, 1 failed, 2 unsigned, 3 unknown sender
+- Fixed `--conf-path`
+
+
 **v0.1.2 - 09-10-2026**
 
 - Bumped icfx to v0.1.6

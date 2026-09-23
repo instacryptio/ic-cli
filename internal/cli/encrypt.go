@@ -118,7 +118,7 @@ var encryptCmd = &cobra.Command{
 			// Advisory warnings are composed by icfx (e.g. a group member with no
 			// active lock, or a member whose contact was deleted). Clients print.
 			for _, w := range resolveWarnings {
-				fmt.Println(utils.RenderWarning("  " + w))
+				fmt.Fprintln(os.Stderr, utils.RenderWarning("  "+w)) // stdout may carry the ciphertext
 			}
 		}
 
@@ -144,11 +144,12 @@ var encryptCmd = &cobra.Command{
 			signer = unlocked
 		}
 		publicMeta, _ := cmd.Flags().GetBool("public-meta")
-		// Default to the private streaming profile; --public-meta selects the
-		// public streaming profile (metadata in a readable plaintext header).
-		profile := format.ProfilePrivateStreaming
+		// Metadata is always sealed inside the ciphertext; --public-meta adds an
+		// advisory plaintext copy to the header for tooling that reads it
+		// without decrypting.
+		profile := format.ProfilePrivate
 		if publicMeta {
-			profile = format.ProfilePublicStreaming
+			profile = format.ProfilePublic
 		}
 
 		switch outputFormat {
@@ -171,10 +172,9 @@ var encryptCmd = &cobra.Command{
 			}
 			fmt.Println(utils.RenderSuccess("Encrypted: ") + outputPath)
 		default:
-			// .icfx streaming container: streams to disk in constant memory. By
-			// default the metadata travels encrypted inside the payload
-			// (ProfilePrivateStreaming); --public-meta emits ProfilePublicStreaming
-			// with a readable plaintext header.
+			// .icfx container: streams to disk in constant memory. The metadata
+			// travels encrypted inside the payload; --public-meta adds an
+			// advisory plaintext header copy.
 			if outputPath == "" {
 				// stdout is armored, which needs the whole container in memory.
 				var buf bytes.Buffer
@@ -207,7 +207,7 @@ var encryptCmd = &cobra.Command{
 		}
 
 		if flagVerbose {
-			fmt.Println(utils.RenderDim(fmt.Sprintf("  Format: %s, Signed: %v", outputFormat, !noSign)))
+			fmt.Fprintln(os.Stderr, utils.RenderDim(fmt.Sprintf("  Format: %s, Signed: %v", outputFormat, !noSign)))
 		}
 		return nil
 	},
@@ -261,7 +261,7 @@ func init() {
 	encryptCmd.Flags().StringP("output", "o", "", "Output file path")
 	encryptCmd.Flags().String("format", "icfx", "Output format: icfx or age")
 	encryptCmd.Flags().Bool("no-sign", false, "Skip signing the encrypted payload")
-	encryptCmd.Flags().Bool("public-meta", false, "Embed unencrypted metadata (sender, filename) in the container header for tooling that must read it without decrypting; default containers are private like PGP")
+	encryptCmd.Flags().Bool("public-meta", false, "Also put a readable copy of the metadata (sender fingerprint, filename) in the container header for tooling that must see it without decrypting. The sealed copy inside the ciphertext stays authoritative; default containers expose nothing")
 
 	rootCmd.AddCommand(encryptCmd)
 }

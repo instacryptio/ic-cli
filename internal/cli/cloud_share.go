@@ -235,6 +235,10 @@ var cloudShareGetCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
+		policy, err := verifyPolicyFrom(cmd)
+		if err != nil {
+			return err
+		}
 		c, err := requireCloudAuth(ctx)
 		if err != nil {
 			return err
@@ -307,7 +311,11 @@ var cloudShareGetCmd = &cobra.Command{
 			return err
 		}
 
-		var decErr error
+		// The verdict arrives after the plaintext is in the temp file; the
+		// policy (gateErr) decides whether it is promoted to dest below. A
+		// bare-age share carries no signature and is gated as unsigned, so
+		// --require-verified cannot be sidestepped by the blob's format.
+		var decErr, gateErr error
 		switch format.Detect(head[:n]) {
 		case format.FormatICFX:
 			var contactList []contacts.Contact
@@ -317,13 +325,16 @@ var cloudShareGetCmd = &cobra.Command{
 			var res decrypt.VerifyResult
 			res, decErr = decrypt.DecryptAndVerifyStream(enc, outTmp, unlocked, contactList)
 			if decErr == nil {
-				renderVerify(res, os.Stdout)
+				gateErr = gateVerify(res, os.Stdout, policy)
 			}
 		default:
-			var r io.Reader
-			r, decErr = unlocked.DecryptStream(enc)
-			if decErr == nil {
-				_, decErr = io.Copy(outTmp, r)
+			gateErr = gateVerify(decrypt.VerifyResult{Status: decrypt.VerifyUnsigned}, os.Stdout, policy)
+			if gateErr == nil {
+				var r io.Reader
+				r, decErr = unlocked.DecryptStream(enc)
+				if decErr == nil {
+					_, decErr = io.Copy(outTmp, r)
+				}
 			}
 		}
 		if cerr := outTmp.Close(); cerr != nil && decErr == nil {
@@ -332,6 +343,10 @@ var cloudShareGetCmd = &cobra.Command{
 		if decErr != nil {
 			_ = os.Remove(outPath)
 			return fmt.Errorf("decrypting share: %w", decErr)
+		}
+		if gateErr != nil {
+			_ = os.Remove(outPath)
+			return gateErr
 		}
 		if err := os.Rename(outPath, dest); err != nil {
 			_ = os.Remove(outPath)
@@ -519,6 +534,7 @@ func init() {
 	cloudShareSendCmd.Flags().BoolVar(&shareSendNoMail, "no-mail", false, "skip the recipient notification e-mail (they still see it in their app / inbox)")
 
 	cloudShareGetCmd.Flags().StringVarP(&shareGetOut, "out", "o", ".", "output directory")
+	addVerifyPolicyFlags(cloudShareGetCmd)
 	cloudShareDownloadCmd.Flags().StringVarP(&shareDownloadOut, "out", "o", ".", "output directory")
 
 	cloudShareCmd.AddCommand(
