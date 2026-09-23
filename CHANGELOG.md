@@ -1,6 +1,6 @@
 # CHANGELOG
 
-**v0.1.3 - 09-24-2026**
+**v0.1.3 - 09-23-2026**
 
 - Bumped icfx to v0.1.7 (hardening) 
 - `icc decrypt` / `icc cloud share get`: a failed signature asks before writing (refuses in scripts); new `--allow-unverified` and `--require-verified`
