@@ -1,10 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
-
-	"golang.org/x/term"
 
 	"github.com/instacryptio/ic-cli/internal/cli"
 	"github.com/instacryptio/ic-cli/internal/utils"
@@ -16,7 +15,7 @@ func main() {
 	// when stdout is not a terminal — piped output (armored ciphertext,
 	// decrypted plaintext) must be exactly the data.
 	cfg, _ := config.Load()
-	if !isCompletionRequest() && cfg.Banner && term.IsTerminal(int(os.Stdout.Fd())) {
+	if !isCompletionRequest() && cfg.Banner && utils.StdoutIsTerminal() {
 		banner := `
 ░▒▓█▓▒░░▒▓██████▓▒░        ░▒▓██████▓▒░░▒▓█▓▒░      ░▒▓█▓▒░
 ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░
@@ -29,7 +28,15 @@ func main() {
 	}
 
 	if err := cli.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, utils.RenderError(err.Error()))
+		if err.Error() != "" {
+			fmt.Fprintln(os.Stderr, utils.RenderError(err.Error()))
+		}
+		// Outcomes that carry their own status (icc verify) exit with it;
+		// everything else is a failure.
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			os.Exit(coded.ExitCode())
+		}
 		os.Exit(1)
 	}
 }

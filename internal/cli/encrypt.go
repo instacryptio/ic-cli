@@ -118,7 +118,7 @@ var encryptCmd = &cobra.Command{
 			// Advisory warnings are composed by icfx (e.g. a group member with no
 			// active lock, or a member whose contact was deleted). Clients print.
 			for _, w := range resolveWarnings {
-				fmt.Println(utils.RenderWarning("  " + w))
+				fmt.Fprintln(os.Stderr, utils.RenderWarning("  "+w)) // stdout may carry the ciphertext
 			}
 		}
 
@@ -207,7 +207,7 @@ var encryptCmd = &cobra.Command{
 		}
 
 		if flagVerbose {
-			fmt.Println(utils.RenderDim(fmt.Sprintf("  Format: %s, Signed: %v", outputFormat, !noSign)))
+			fmt.Fprintln(os.Stderr, utils.RenderDim(fmt.Sprintf("  Format: %s, Signed: %v", outputFormat, !noSign)))
 		}
 		return nil
 	},

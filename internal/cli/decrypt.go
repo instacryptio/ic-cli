@@ -1,13 +1,13 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -64,8 +64,9 @@ var decryptCmd = &cobra.Command{
 			contactList, _ = store.Load()
 		}
 
-		// Fast path: a file input decrypting to a file output streams in constant
-		// memory. Armored/stdin/stdout fall through to buffered.
+		// Fast path: a file input decrypting to a regular file output streams in
+		// constant memory. Armored/stdin/stdout/special targets fall through to
+		// buffered.
 		if len(args) == 1 && outputPath != "" {
 			if streamed, serr := tryStreamDecryptFile(args[0], outputPath, unlocked, contactList, policy); streamed {
 				return serr
@@ -145,52 +146,54 @@ func addVerifyPolicyFlags(cmd *cobra.Command) {
 // released. A failed signature means the file claims a signer it cannot
 // prove — tampering, or a file written before the current signing scheme —
 // so the user is asked (interactive) or the decrypt is refused
-// (non-interactive) unless the policy says otherwise. An unknown sender is
+// (non-interactive) unless the policy says otherwise. A status this build
+// does not know is treated the same way: fail closed. An unknown sender is
 // advisory: the plaintext is released with a warning.
 func gateVerify(v decrypt.VerifyResult, statusOut *os.File, p verifyPolicy) error {
 	renderVerify(v, statusOut)
 	switch v.Status {
 	case decrypt.VerifyOK:
 		return nil
-	case decrypt.VerifyFailed:
-		switch {
-		case p.requireVerified:
-			return fmt.Errorf("signature verification failed; nothing written")
-		case p.allowUnverified:
-			fmt.Fprintln(statusOut, utils.RenderWarning("  Proceeding anyway (--allow-unverified)"))
-			return nil
-		case !utils.IsInteractive():
-			return fmt.Errorf("signature verification failed; refusing to decrypt (pass --allow-unverified to override)")
-		}
-		if !askYesNo(statusOut, "This file's signature failed verification. Do you still want to decrypt it? [y/N]: ") {
-			return fmt.Errorf("signature verification failed; nothing written")
-		}
-		return nil
-	default: // VerifyUnsigned, VerifyUnknownSigner, anything newer
+	case decrypt.VerifyUnsigned, decrypt.VerifyUnknownSigner:
 		if p.requireVerified {
 			return fmt.Errorf("signature not verified (%s); refusing to decrypt (--require-verified)", v.Status)
 		}
 		return nil
 	}
+	// VerifyFailed, and anything newer than this build.
+	switch {
+	case p.requireVerified:
+		return fmt.Errorf("signature verification failed; nothing written")
+	case p.allowUnverified:
+		fmt.Fprintln(statusOut, utils.RenderWarning("  Proceeding anyway (--allow-unverified)"))
+		return nil
+	case !utils.IsInteractive():
+		return fmt.Errorf("signature verification failed; refusing to decrypt (pass --allow-unverified to override)")
+	}
+	if !askYesNo(statusOut, "This file's signature failed verification. Do you still want to decrypt it? [y/N]: ") {
+		return fmt.Errorf("signature verification failed; nothing written")
+	}
+	return nil
 }
 
 // askYesNo prompts on statusOut (stderr when the plaintext is headed for
 // stdout, so the question never lands inside the output) and reads the answer
-// from stdin. Only "y"/"yes" counts as yes.
+// through the shared stdin reader every other prompt uses, so no typed-ahead
+// line is lost between prompts. Only "y"/"yes" counts as yes.
 func askYesNo(statusOut *os.File, prompt string) bool {
 	fmt.Fprint(statusOut, prompt)
-	answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	answer = strings.TrimSpace(answer)
-	return strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")
+	return utils.ConfirmPrompt("")
 }
 
 // tryStreamDecryptFile streams a binary .icfx (or bare-age) file at inputPath to
 // outputPath in constant memory. It returns handled=false (no error) when the
-// input is armored and should take the buffered path instead.
+// input is armored, or the output is an existing special file (device, FIFO)
+// that cannot take a temp-and-rename — those take the buffered path instead.
 //
 // The verdict is only known once the whole plaintext is out, so it is
-// streamed to a hidden temp file beside outputPath and renamed into place only
-// if the policy releases it — nothing unverified ever appears at outputPath.
+// streamed into a hidden temp file beside outputPath and renamed into place
+// only if the policy releases it — nothing unverified ever appears at
+// outputPath, and the plaintext never touches the shared OS temp directory.
 func tryStreamDecryptFile(inputPath, outputPath string, unlocked *identity.Unlocked, contactList []contacts.Contact, p verifyPolicy) (handled bool, err error) {
 	head, herr := readFileHead(inputPath, 64)
 	if herr != nil {
@@ -199,22 +202,33 @@ func tryStreamDecryptFile(inputPath, outputPath string, unlocked *identity.Unloc
 	if format.Detect(head) == format.FormatArmored {
 		return false, nil // armored text isn't seekable-friendly; buffer it
 	}
+	if fi, serr := os.Stat(outputPath); serr == nil && !fi.Mode().IsRegular() {
+		return false, nil // /dev/stdout, a FIFO, …: write directly, gated in memory
+	}
 	if !utils.ConfirmOverwrite(outputPath) {
 		fmt.Println("Canceled.")
 		return true, nil
 	}
-	dir, base := filepath.Split(outputPath)
-	tmp, terr := os.CreateTemp(dir, "."+base+".tmp-*")
+	tmp, terr := tempBeside(outputPath)
 	if terr != nil {
 		return true, fmt.Errorf("creating output: %w", terr)
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
-
-	res, derr := decrypt.DecryptFile(inputPath, tmpPath, unlocked, contactList)
-	if derr != nil {
+	discard := func() {
+		tmp.Close()
 		_ = os.Remove(tmpPath)
+	}
+	// An interrupted decrypt must not leave a hidden plaintext file behind.
+	defer onInterrupt(discard)()
+
+	res, derr := decryptInto(inputPath, tmp, unlocked, contactList)
+	if derr != nil {
+		discard()
 		return true, fmt.Errorf("decrypting: %w", derr)
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		_ = os.Remove(tmpPath)
+		return true, fmt.Errorf("finalizing output: %w", cerr)
 	}
 	if gerr := gateVerify(res, os.Stdout, p); gerr != nil {
 		_ = os.Remove(tmpPath)
@@ -227,6 +241,63 @@ func tryStreamDecryptFile(inputPath, outputPath string, unlocked *identity.Unloc
 	fmt.Println(utils.RenderSuccess("Decrypted: ") + filepath.Base(inputPath))
 	fmt.Println(utils.RenderSuccess("Output: ") + outputPath)
 	return true, nil
+}
+
+// tempBeside creates the hidden temp file a streamed output is written to:
+// in outputPath's own directory (never the OS temp dir — same volume, same
+// permissions, and the rename into place stays atomic), mode 0600.
+func tempBeside(outputPath string) (*os.File, error) {
+	return os.CreateTemp(filepath.Dir(outputPath), "."+filepath.Base(outputPath)+".tmp-*")
+}
+
+// decryptInto streams the file at inPath — an .icfx container or a bare age
+// file — into the already-open out, so the output is only ever reached
+// through the descriptor this process created (never re-opened by path).
+func decryptInto(inPath string, out *os.File, unlocked *identity.Unlocked, contactList []contacts.Contact) (decrypt.VerifyResult, error) {
+	in, err := os.Open(inPath)
+	if err != nil {
+		return decrypt.VerifyResult{}, err
+	}
+	defer in.Close()
+	magic := make([]byte, len(format.MagicBytes))
+	if _, err := io.ReadFull(in, magic); err != nil {
+		return decrypt.VerifyResult{}, fmt.Errorf("reading input: %w", err)
+	}
+	if _, err := in.Seek(0, io.SeekStart); err != nil {
+		return decrypt.VerifyResult{}, err
+	}
+	if bytes.Equal(magic, format.MagicBytes) {
+		return decrypt.DecryptAndVerifyStream(in, out, unlocked, contactList)
+	}
+	// Bare age file: no container, no signature.
+	r, err := unlocked.DecryptStream(in)
+	if err != nil {
+		return decrypt.VerifyResult{}, err
+	}
+	if _, err := io.Copy(out, r); err != nil {
+		return decrypt.VerifyResult{}, err
+	}
+	return decrypt.VerifyResult{Status: decrypt.VerifyUnsigned}, nil
+}
+
+// onInterrupt runs cleanup and exits (130) if the process is interrupted
+// while the returned stop func has not been called.
+func onInterrupt(cleanup func()) (stop func()) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sigs:
+			cleanup()
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sigs)
+		close(done)
+	}
 }
 
 // readFileHead reads up to n bytes from the start of a file (for format sniffing).
@@ -312,8 +383,10 @@ func decryptAge(data []byte, unlocked *identity.Unlocked, inputPath, outputPath 
 
 func writeDecryptOutput(plaintext []byte, inputPath, outputPath string) error {
 	if outputPath == "" {
+		// Everything but the plaintext goes to stderr: stdout must be exactly
+		// the data when it is piped.
 		fmt.Fprintln(os.Stderr, utils.RenderSuccess("Decrypted: ")+filepath.Base(inputPath))
-		fmt.Println("---")
+		fmt.Fprintln(os.Stderr, "---")
 		os.Stdout.Write(plaintext)
 		return nil
 	}

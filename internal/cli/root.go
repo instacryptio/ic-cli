@@ -29,7 +29,11 @@ var rootCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		fmt.Println()
+		// Trailing blank line for readability — only on a terminal; piped
+		// stdout must be exactly the command's output.
+		if utils.StdoutIsTerminal() {
+			fmt.Println()
+		}
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()

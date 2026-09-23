@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -26,12 +25,17 @@ var verifyCmd = &cobra.Command{
 An .icfx container (binary or armored) is verified by decrypting it in memory
 with your identity — the signature covers the plaintext and the signer is
 named inside the encryption, so only a recipient can check it. Nothing is
-written. Exits non-zero unless the signature verifies against a contact or
-one of your own identities.
+written.
+
+Exit status reports what was found, for scripts:
+  0  signature verified against a contact or one of your own identities
+  1  signature present but it does not hold (or the file could not be read)
+  2  file is not signed
+  3  signed by a sender not in your contacts or identities
 
 Any other file is checked against a detached signature (<file>.sig, or
 --signature) made with 'icc sign', matched against your contacts or the lock
-given with --signer.`,
+given with --signer; exit 0 verified, 1 otherwise.`,
 	Args: cobra.ExactArgs(1),
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveDefault
@@ -48,7 +52,7 @@ given with --signer.`,
 			}
 			switch format.Detect(head) {
 			case format.FormatICFX, format.FormatArmored:
-				if isExplicitKey(signerFlag) {
+				if explicitKey(signerFlag) != nil {
 					return fmt.Errorf("--signer with a lock verifies detached signatures only; an .icfx container is verified by decrypting it with your identity")
 				}
 				return verifyContainer(inputPath)
@@ -74,10 +78,15 @@ given with --signer.`,
 	},
 }
 
-// isExplicitKey reports whether the --signer value is a base64 lock rather
-// than a contact alias or fingerprint.
-func isExplicitKey(signerFlag string) bool {
-	return strings.Contains(signerFlag, "/") || len(signerFlag) > 100
+// explicitKey returns the decoded lock when the --signer value is a base64
+// ML-DSA-65 public key, and nil when it is a contact alias or fingerprint —
+// decided by what the value decodes to, so an alias may contain any character.
+func explicitKey(signerFlag string) []byte {
+	pub, err := base64.StdEncoding.DecodeString(signerFlag)
+	if err != nil || len(pub) != icfxCrypto.SigningPublicKeySize {
+		return nil
+	}
+	return pub
 }
 
 // verifyDetached checks a detached signature against the lock given with
@@ -85,11 +94,7 @@ func isExplicitKey(signerFlag string) bool {
 // fingerprint). The user's own identities are not candidates here — matching
 // them would mean unlocking each one.
 func verifyDetached(data, signature []byte, signerFlag string, contactStore *contacts.Store) error {
-	if isExplicitKey(signerFlag) {
-		pubKey, err := base64.StdEncoding.DecodeString(signerFlag)
-		if err != nil {
-			return fmt.Errorf("decoding signer lock (public key): %w", err)
-		}
+	if pubKey := explicitKey(signerFlag); pubKey != nil {
 		ok, err := icfxCrypto.Verify(data, signature, pubKey)
 		if err != nil {
 			return fmt.Errorf("verifying: %w", err)
@@ -188,19 +193,19 @@ func verifyContainer(inputPath string) error {
 	switch res.Status {
 	case decrypt.VerifyUnsigned:
 		fmt.Println(utils.RenderDim("File is not signed."))
-		return nil
+		return &exitError{code: exitVerifyUnsigned}
 	case decrypt.VerifyOK:
 		renderVerify(res, os.Stdout)
 		return nil
 	case decrypt.VerifyFailed:
 		renderVerify(res, os.Stdout)
-		return fmt.Errorf("signature verification failed")
+		return &exitError{code: exitVerifyFailed, msg: "signature verification failed"}
 	case decrypt.VerifyUnknownSigner:
 		renderVerify(res, os.Stdout)
-		return fmt.Errorf("signature could not be verified: unknown sender")
+		return &exitError{code: exitVerifyUnknownSigner, msg: "signature could not be verified: unknown sender"}
 	default:
 		renderVerify(res, os.Stdout)
-		return fmt.Errorf("signature could not be verified (%s)", res.Status)
+		return &exitError{code: exitVerifyFailed, msg: fmt.Sprintf("signature could not be verified (%s)", res.Status)}
 	}
 }
 
@@ -212,12 +217,18 @@ func openContainer(path string) (io.ReadSeekCloser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading input file: %w", err)
 	}
-	head, err := readFileHead(path, 64)
-	if err != nil {
+	// Sniff from the descriptor we hold, so what is inspected is what is read.
+	head := make([]byte, 64)
+	n, rerr := io.ReadFull(f, head)
+	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {
 		f.Close()
-		return nil, fmt.Errorf("reading input file: %w", err)
+		return nil, fmt.Errorf("reading input file: %w", rerr)
 	}
-	if format.Detect(head) != format.FormatArmored {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if format.Detect(head[:n]) != format.FormatArmored {
 		return f, nil
 	}
 	defer f.Close()

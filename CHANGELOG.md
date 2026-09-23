@@ -7,7 +7,8 @@
 - Output is decrypted to a temp file and promoted only once released, so unverified plaintext never lands at the destination
 - `icc verify` works on the containers the clients actually write (was rejecting every streaming container) and on armored input
 - Sender fingerprints are sanitized before reaching the terminal
-- The banner is skipped when stdout is not a terminal (piped armored/plaintext output was corrupted)
+- When stdout is not a terminal it carries exactly the command's data: the banner, trailing spacing and the decrypt `---` marker no longer corrupt piped armored/plaintext output
+- `icc verify` exit status: 0 verified, 1 failed, 2 unsigned, 3 unknown sender
 
 
 **v0.1.2 - 09-10-2026**

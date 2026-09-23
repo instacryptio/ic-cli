@@ -144,6 +144,13 @@ func ConfirmPromptDefaultYes(prompt string) bool {
 	return !strings.EqualFold(answer, "n") && !strings.EqualFold(answer, "no")
 }
 
+// StdoutIsTerminal reports whether stdout is a terminal. Decorations (banner,
+// spacing) are only printed then; when stdout is a pipe or a file it must
+// carry exactly the command's data (armored ciphertext, decrypted plaintext).
+func StdoutIsTerminal() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
+}
+
 // IsInteractive reports whether stdin is a terminal, i.e. a human can answer
 // prompts. Callers use it to decide between prompting and applying a
 // non-interactive default (so scripts/pipes never block on an unanswerable
